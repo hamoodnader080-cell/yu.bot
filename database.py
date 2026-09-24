@@ -86,7 +86,86 @@ def _get_scalar(row: Any) -> Any:
         return None
     if isinstance(row, dict):
         return next(iter(row.values()))
-    return row[0]
+def _sync_seed_data(cursor, is_pg: bool) -> None:
+    """مزامنة بيانات المشتركين والمفاتيح والإعدادات تلقائياً عند التشغيل على السحابة"""
+    seed_file = config.BASE_DIR / "seed_data.json"
+    if not seed_file.exists():
+        return
+    try:
+        with open(seed_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if is_pg:
+            # مسح المفاتيح غير المستخدمة القديمة وتثبيت المفاتيح الحقيقية
+            cursor.execute("DELETE FROM activation_keys WHERE is_used = 0;")
+
+            # 1. مفاتيح التفعيل
+            for k in data.get("activation_keys", []):
+                sql_k = """
+                    INSERT INTO activation_keys (key_code, duration_days, max_courses, is_used, used_by_user_id, used_by_username, used_by_first_name, used_at, expires_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT(key_code) DO UPDATE SET
+                        is_used = EXCLUDED.is_used,
+                        used_by_user_id = EXCLUDED.used_by_user_id,
+                        used_by_username = EXCLUDED.used_by_username,
+                        used_by_first_name = EXCLUDED.used_by_first_name,
+                        used_at = EXCLUDED.used_at,
+                        expires_at = EXCLUDED.expires_at
+                """
+                cursor.execute(sql_k, (
+                    k.get("key_code"), k.get("duration_days", 0), k.get("max_courses", 10),
+                    k.get("is_used", 0), k.get("used_by_user_id"), k.get("used_by_username", ""),
+                    k.get("used_by_first_name", ""), k.get("used_at"), k.get("expires_at")
+                ))
+
+            # 2. المستخدمين المفعّلين
+            for u in data.get("activated_users", []):
+                sql_u = """
+                    INSERT INTO activated_users (user_id, username, first_name, key_code, is_active, max_courses, activated_at, expires_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        username = EXCLUDED.username,
+                        first_name = EXCLUDED.first_name,
+                        key_code = EXCLUDED.key_code,
+                        is_active = EXCLUDED.is_active,
+                        max_courses = EXCLUDED.max_courses,
+                        expires_at = EXCLUDED.expires_at
+                """
+                cursor.execute(sql_u, (
+                    u.get("user_id"), u.get("username", ""), u.get("first_name", ""),
+                    u.get("key_code", ""), u.get("is_active", 1), u.get("max_courses", 10),
+                    u.get("activated_at"), u.get("expires_at")
+                ))
+
+            # 3. الشعب المراقبة
+            for c in data.get("tracked_courses", []):
+                sql_c = """
+                    INSERT INTO tracked_courses (user_id, chat_id, course_no, course_name, section_no, capacity, registered, available_seats, last_status, is_active, notified)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT(user_id, course_no, section_no) DO UPDATE SET
+                        capacity = EXCLUDED.capacity,
+                        registered = EXCLUDED.registered,
+                        available_seats = EXCLUDED.available_seats,
+                        last_status = EXCLUDED.last_status,
+                        is_active = EXCLUDED.is_active
+                """
+                cursor.execute(sql_c, (
+                    c.get("user_id"), c.get("chat_id"), c.get("course_no"),
+                    c.get("course_name", ""), c.get("section_no"), c.get("capacity", 0),
+                    c.get("registered", 0), c.get("available_seats", 0),
+                    c.get("last_status", "UNKNOWN"), c.get("is_active", 1), c.get("notified", 0)
+                ))
+
+            # 4. إعدادات البوت والمشرفين
+            for s in data.get("bot_settings", []):
+                sql_s = """
+                    INSERT INTO bot_settings (setting_key, setting_val, updated_at)
+                    VALUES (%s, %s, CURRENT_TIMESTAMP)
+                    ON CONFLICT(setting_key) DO UPDATE SET setting_val = EXCLUDED.setting_val
+                """
+                cursor.execute(sql_s, (s.get("setting_key"), s.get("setting_val")))
+    except Exception as e:
+        logger.warning(f"⚠️ Error syncing seed data: {e}")
 
 
 def init_db() -> None:
@@ -160,7 +239,8 @@ def init_db() -> None:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
-            logger.info("✅ PostgreSQL Database Initialized Successfully!")
+            _sync_seed_data(cursor, is_pg=True)
+            logger.info("✅ PostgreSQL Database Initialized and Synced Successfully!")
         else:
             # جداول SQLite المحلية
             cursor.execute("""

@@ -1,0 +1,182 @@
+{
+  "activation_keys": [
+    {
+      "id": 4,
+      "key_code": "YU-2XTG-HQGX-2RCX",
+      "duration_days": 0,
+      "max_courses": 9999999,
+      "is_used": 1,
+      "used_by_user_id": 5331668455,
+      "used_by_username": "khabbass",
+      "used_at": "2026-09-24 19:39:15",
+      "expires_at": null,
+      "created_at": "2026-09-24 19:34:40",
+      "used_by_first_name": null
+    },
+    {
+      "id": 11,
+      "key_code": "YU-5USP-6NQU-WU9M",
+      "duration_days": 0,
+      "max_courses": 999999,
+      "is_used": 1,
+      "used_by_user_id": 8297752724,
+      "used_by_username": "",
+      "used_at": "2026-09-24 20:50:34",
+      "expires_at": null,
+      "created_at": "2026-09-24 20:46:50",
+      "used_by_first_name": null
+    },
+    {
+      "id": 13,
+      "key_code": "YU-5NU8-F44A-UVL5",
+      "duration_days": 0,
+      "max_courses": 999999,
+      "is_used": 1,
+      "used_by_user_id": 6288893176,
+      "used_by_username": "",
+      "used_at": "2026-09-24 21:03:32",
+      "expires_at": null,
+      "created_at": "2026-09-24 20:52:59",
+      "used_by_first_name": null
+    }
+  ],
+  "activated_users": [
+    {
+      "user_id": 12345,
+      "username": "testuser",
+      "first_name": "Test",
+      "key_code": "YU-YFCN-4VJ5-C8TK",
+      "is_active": 1,
+      "max_courses": 5,
+      "activated_at": "2026-09-24 14:45:08",
+      "expires_at": null
+    },
+    {
+      "user_id": 5331668455,
+      "username": "khabbass",
+      "first_name": "Asem",
+      "key_code": "YU-2XTG-HQGX-2RCX",
+      "is_active": 1,
+      "max_courses": 9999999,
+      "activated_at": "2026-09-24 19:39:15",
+      "expires_at": null
+    },
+    {
+      "user_id": 6288893176,
+      "username": "",
+      "first_name": "Shahed",
+      "key_code": "YU-5NU8-F44A-UVL5",
+      "is_active": 1,
+      "max_courses": 999999,
+      "activated_at": "2026-09-24 21:03:34",
+      "expires_at": null
+    },
+    {
+      "user_id": 8297752724,
+      "username": "",
+      "first_name": "Leen",
+      "key_code": "YU-5USP-6NQU-WU9M",
+      "is_active": 1,
+      "max_courses": 999999,
+      "activated_at": "2026-09-24 20:50:36",
+      "expires_at": null
+    },
+    {
+      "user_id": 8740913083,
+      "username": "",
+      "first_name": "Nadia",
+      "key_code": "YU-WYRD-35UG-L2NB",
+      "is_active": 1,
+      "max_courses": 999,
+      "activated_at": "2026-09-24 22:09:10",
+      "expires_at": null
+    }
+  ],
+  "tracked_courses": [
+    {
+      "id": 27,
+      "user_id": 8297752724,
+      "chat_id": 8297752724,
+      "course_no": "SCI 101",
+      "course_name": "البيئة والصحة العامة",
+      "section_no": "6",
+      "capacity": 50,
+      "registered": 42,
+      "available_seats": 8,
+      "last_status": "OPEN",
+      "is_active": 1,
+      "notified": 1,
+      "created_at": "2026-09-23 19:54:28",
+      "updated_at": "2026-09-24 19:50:15",
+      "last_alert_msg_id": null
+    },
+    {
+      "id": 29,
+      "user_id": 5331668455,
+      "chat_id": 5331668455,
+      "course_no": "BF 316",
+      "course_name": "إدارة البنوك والمخاطر الإئتمانية",
+      "section_no": "1",
+      "capacity": 50,
+      "registered": 22,
+      "available_seats": 28,
+      "last_status": "OPEN",
+      "is_active": 1,
+      "notified": 1,
+      "created_at": "2026-09-24 19:40:05",
+      "updated_at": "2026-09-24 19:50:15",
+      "last_alert_msg_id": null
+    },
+    {
+      "id": 31,
+      "user_id": 6288893176,
+      "chat_id": 6288893176,
+      "course_no": "FE 102",
+      "course_name": "مبادئ في الاقتصاد الجزئي",
+      "section_no": "2",
+      "capacity": 50,
+      "registered": 50,
+      "available_seats": 0,
+      "last_status": "CLOSED",
+      "is_active": 1,
+      "notified": 0,
+      "created_at": "2026-09-24 21:04:36",
+      "updated_at": "2026-09-24 22:44:44",
+      "last_alert_msg_id": null
+    },
+    {
+      "id": 36,
+      "user_id": 8740913083,
+      "chat_id": 8740913083,
+      "course_no": "CS 111L",
+      "course_name": "مختبر البرمجة بلغة مختارة",
+      "section_no": "1",
+      "capacity": 50,
+      "registered": 50,
+      "available_seats": 0,
+      "last_status": "CLOSED",
+      "is_active": 1,
+      "notified": 0,
+      "created_at": "2026-09-24 22:40:00",
+      "updated_at": "2026-09-24 22:44:45",
+      "last_alert_msg_id": null
+    }
+  ],
+  "bot_settings": [
+    {
+      "setting_key": "log_channel_id",
+      "setting_val": "-1004400753235",
+      "updated_at": "2026-09-24 20:19:00"
+    },
+    {
+      "setting_key": "sub_admins",
+      "setting_val": "8297752724",
+      "updated_at": "2026-09-24 22:39:42"
+    },
+    {
+      "setting_key": "sub_admins_data",
+      "setting_val": "[{\"user_id\": 8297752724, \"name\": \"Leen Alawneh\", \"username\": \"\"}]",
+      "updated_at": "2026-09-24 22:39:41"
+    }
+  ]
+}
