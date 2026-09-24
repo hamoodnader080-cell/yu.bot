@@ -422,7 +422,7 @@ def activate_user_with_key(
     - يستخرج الكود بذكاء عبر Regex حتى لو تم لصق رسالة كاملة
     - يتحقق من وجود المفتاح
     - يتأكد أنه غير مستخدم من حساب آخر
-    - يربط المفتاح بحساب هذا المستخدم بشكل دائم
+    - يربط المفتاح بحساب هذا المستخدم بشكل دائم لا ينحذف إطلاقاً
     """
     cleaned_input = raw_key.strip().upper()
     match = re.search(r'YU-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}', cleaned_input, re.IGNORECASE)
@@ -443,17 +443,32 @@ def activate_user_with_key(
         key_data = dict(key_row)
 
         # إذا كان المفتاح مستخدماً مسبقاً
-        if key_data["is_used"] == 1:
-            if key_data.get("used_by_user_id") == user_id:
-                return True, "✅ حسابك مفعّل مسبقاً بهذا المفتاح!", key_data
+        if key_data.get("is_used") == 1:
+            used_uid = key_data.get("used_by_user_id")
+            if used_uid and int(used_uid) == int(user_id):
+                # إعادة تثبيت وتأكيد التفعيل الدائم للحساب نفسه
+                sql_reup = """
+                    INSERT INTO activated_users (
+                        user_id, username, first_name, key_code, is_active, 
+                        max_courses, activated_at, expires_at
+                    )
+                    VALUES (?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP, NULL)
+                    ON CONFLICT(user_id) DO UPDATE SET 
+                        is_active = 1,
+                        key_code = excluded.key_code,
+                        max_courses = excluded.max_courses
+                """
+                max_c = key_data.get("max_courses") or 999
+                cursor.execute(_format_sql(sql_reup, is_pg), (user_id, username_clean, first_name_clean, key_code, max_c))
+                return True, "✅ حسابك مفعّل مسبقاً بهذا المفتاح واشتراكك نشط ودائم! ♾️", key_data
             else:
                 return False, "❌ هذا المفتاح تم استخدامه وتفعيله مسبقاً لحساب آخر وغير صالح!", None
 
-        # حساب تاريخ انتهاء الصلاحية
+        # حساب مدة المفتاح (دائم مفتوح افتراضياً)
         expires_at_val = None
-        expires_at_str = None
-        if key_data.get("duration_days") and key_data["duration_days"] > 0:
-            exp_date = datetime.now() + timedelta(days=key_data["duration_days"])
+        expires_at_str = "دائم ومفتوح ♾️ (طوال الفصل)"
+        if key_data.get("duration_days") and int(key_data["duration_days"]) > 0:
+            exp_date = datetime.now() + timedelta(days=int(key_data["duration_days"]))
             expires_at_val = exp_date if is_pg else exp_date.strftime("%Y-%m-%d %H:%M:%S")
             expires_at_str = exp_date.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -466,8 +481,8 @@ def activate_user_with_key(
         """
         cursor.execute(_format_sql(sql_update_key, is_pg), (user_id, username_clean, expires_at_val, key_data["id"]))
 
-        # إضافة أو تحديث المستخدم في جدول المستخدمين المفعّلين
-        max_c = key_data.get("max_courses") or MAX_COURSES_PER_USER
+        # إضافة أو تحديث المستخدم في جدول المستخدمين المفعّلين بشكل دائم
+        max_c = key_data.get("max_courses") or 999
         sql_upsert_user = """
             INSERT INTO activated_users (
                 user_id, username, first_name, key_code, is_active, 
@@ -485,7 +500,7 @@ def activate_user_with_key(
         """
         cursor.execute(_format_sql(sql_upsert_user, is_pg), (user_id, username_clean, first_name_clean, key_code, max_c, expires_at_val))
 
-        return True, "🎉 تم تفعيل اشتراكك بنجاح! يمكنك الآن استخدام البوت ومراقبة المقاعد بحرية.", {
+        return True, "🎉 تم تفعيل اشتراكك بنجاح! تم حفظ تفعيل حسابك بشكل دائم ولا ينحذف إطلاقاً. يمكنك الآن استخدام البوت ومراقبة المقاعد بحرية.", {
             "key_code": key_code,
             "duration_days": key_data.get("duration_days", 0),
             "expires_at": expires_at_str,
@@ -504,15 +519,34 @@ def is_user_activated(user_id: int) -> Tuple[bool, str, int]:
         cursor.execute(_format_sql(sql, is_pg), (user_id,))
         user_row = cursor.fetchone()
 
-        if not user_row:
-            return False, "NOT_ACTIVATED", 0
+        if user_row:
+            user_data = dict(user_row)
+            if user_data.get("is_active") == 1:
+                max_c = user_data.get("max_courses") or 999
+                return True, "ACTIVE", max_c
 
-        user_data = dict(user_row)
-        if user_data.get("is_active") != 1:
-            return False, "DEACTIVATED", 0
+        # فحص ذاتي إضافي في جدول المفاتيح (إذا كان الحساب قد استخدم كود تفعيل مسبقاً)
+        sql_key = "SELECT * FROM activation_keys WHERE used_by_user_id = ? ORDER BY id DESC LIMIT 1"
+        cursor.execute(_format_sql(sql_key, is_pg), (user_id,))
+        key_row = cursor.fetchone()
+        if key_row:
+            k_data = dict(key_row)
+            max_c = k_data.get("max_courses") or 999
+            # استعادة وتثبيت التفعيل تلقائياً لمنع أي فقدان للتفعيل
+            sql_fix = """
+                INSERT INTO activated_users (user_id, username, first_name, key_code, is_active, max_courses, activated_at, expires_at)
+                VALUES (?, ?, '', ?, 1, ?, CURRENT_TIMESTAMP, NULL)
+                ON CONFLICT(user_id) DO UPDATE SET is_active = 1, max_courses = excluded.max_courses
+            """
+            cursor.execute(_format_sql(sql_fix, is_pg), (
+                user_id,
+                k_data.get("used_by_username", ""),
+                k_data.get("key_code", ""),
+                max_c
+            ))
+            return True, "ACTIVE", max_c
 
-        max_c = user_data.get("max_courses") or MAX_COURSES_PER_USER
-        return True, "ACTIVE", max_c
+        return False, "NOT_ACTIVATED", 0
 
 
 def get_user_activation_details(user_id: int) -> Optional[Dict[str, Any]]:
