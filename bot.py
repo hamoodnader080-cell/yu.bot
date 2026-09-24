@@ -1063,6 +1063,30 @@ async def handle_general_text_and_activation(update: Update, context: ContextTyp
     await process_activation_key(update, context, user, text)
 
 
+async def handle_general_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """إعادة توجيه أي وسائط (صور، فويس، ملفات) يرسلها الطلاب إلى قناة السجلات"""
+    if not update.message:
+        return
+    user = update.effective_user
+    user_id = user.id if user else 0
+    u_info = f"{html.escape(user.full_name if user else 'طالب')} (@{user.username if user and user.username else 'بدون'}) [<code>{user_id}</code>]"
+    
+    channel_id = db.get_setting("log_channel_id") or config.LOG_CHANNEL_ID
+    if not channel_id or str(update.effective_chat.id) == str(channel_id):
+        return
+    
+    try:
+        cid = int(channel_id) if str(channel_id).lstrip("-").isdigit() else channel_id
+        await send_to_log_channel(context, f"📎 <b>وسائط/ملف وارد من طالب:</b>\n👤 <b>المرسل:</b> {u_info}")
+        await context.bot.forward_message(
+            chat_id=cid,
+            from_chat_id=update.effective_chat.id,
+            message_id=update.message.message_id
+        )
+    except Exception as e:
+        logger.error(f"Error forwarding media to log channel: {e}")
+
+
 # ==========================================
 # معالج ضغطات الأزرار (Callback Query Handler)
 # ==========================================
@@ -1494,6 +1518,7 @@ def main() -> None:
     application.add_handler(conv_handler)
     application.add_handler(CallbackQueryHandler(callback_query_router))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_general_text_and_activation))
+    application.add_handler(MessageHandler(filters.PHOTO | filters.VOICE | filters.AUDIO | filters.Document.ALL | filters.Sticker.ALL, handle_general_media))
 
     # جدولة دورة الفحص الدوري في الخلفية
     job_queue = application.job_queue
