@@ -1,0 +1,1313 @@
+import asyncio
+import logging
+import html
+import os
+import sys
+import time
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from typing import Optional, Tuple, Dict, Any, List
+
+# ضمان توافق محارف UTF-8 في موجه أوامر ويندوز
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+
+import telegram.error
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardRemove
+)
+from telegram.constants import ParseMode
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    filters
+)
+
+import config
+import database as db
+from scraper import YarmoukScraper, CourseCheckResult
+
+# إعداد السجلات (Logging)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """معالج الأخطاء العام لمنع توقف البوت عند حدوث تعارض أو انقطاع شبكة"""
+    if isinstance(context.error, telegram.error.Conflict):
+        logger.warning("تنبيه: تم اكتشاف تعارض في الاتصال (Conflict) - جاري التعامل معه تلقائياً...")
+        return
+    logger.error(f"خطأ غير معالج: {context.error}")
+
+
+# خادم فحص صحي لدعم الاستضافة السحابية (Render / Cloud)
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write("OK - بوت مراقبة شواغر اليرموك يعمل بنجاح 24/7!".encode("utf-8"))
+
+    def log_message(self, format, *args):
+        pass
+
+
+def start_health_server():
+    try:
+        port = int(os.environ.get("PORT", 10000))
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        logger.info(f"🌐 تم تشغيل خادم الفحص الصحي للسحابة بنجاح على المنفذ {port}")
+        server.serve_forever()
+    except Exception as e:
+        logger.warning(f"Health server note: {e}")
+
+
+# حالات محادثة إضافة مادة (خطوتان فقط: رقم المادة -> رقم الشعبة)
+WAITING_COURSE_NO, WAITING_SECTION_NO = range(2)
+
+# كائن فاحص مواد جامعة اليرموك
+scraper = YarmoukScraper()
+
+
+# ==========================================
+# إدارة الصلاحيات ومفاتيح التفعيل (Security)
+# ==========================================
+
+def is_admin(user_id: int) -> bool:
+    """التحقق مما إذا كان المستخدم هو مالك/أدمن البوت"""
+    return user_id in config.ADMIN_IDS
+
+
+def check_user_access(user_id: int) -> Tuple[bool, str, int]:
+    """التحقق من تفعيل المستخدم: (is_allowed, status_code, max_courses)"""
+    if not config.REQUIRE_ACTIVATION or is_admin(user_id):
+        return True, "ACTIVE", config.MAX_COURSES_PER_USER
+    return db.is_user_activated(user_id)
+
+
+async def send_activation_required_message(update: Update) -> None:
+    """إرسال رسالة القفل والمطالبة بكود التفعيل"""
+    user = update.effective_user
+    name = html.escape(user.first_name) if user and user.first_name else "عزيزنا الطالب"
+    
+    owner_handle, owner_url = config.get_owner_contact_info()
+
+    locked_text = (
+        f"👋 أهلاً بك يا <b>{name}</b> في <b>بوت شواغر جامعة اليرموك</b> 🎓\n\n"
+        "🔒 <b>عذراً، البوت متاح بنظام الاشتراك ومفاتيح التفعيل (Activation Key)!</b>\n\n"
+        "🔑 <b>لتفعيل حسابك والبدء فوراً:</b>\n"
+        "أرسل كود التفعيل الخاص بك هنا مباشرة في المحادثة (مثال: <code>YU-XXXX-XXXX-XXXX</code>).\n\n"
+        f"🆔 <b>الآيدي الخاص بك (ID):</b> <code>{user.id}</code> (اضغط للنسخ)\n\n"
+        f"💬 <i>لشراء أو الحصول على كود تفعيل، يرجى التواصل مع: <b>{owner_handle}</b></i>"
+    )
+
+    
+    keyboard = []
+    if owner_url:
+        keyboard.append([InlineKeyboardButton("💬 تواصل مع صاحب البوت للاشتراك", url=owner_url)])
+    keyboard.append([InlineKeyboardButton("🔄 تحديث / إعادة المحاولة", callback_data="btn_main_menu")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if update.callback_query:
+        await update.callback_query.answer("🔒 البوت يتطلب مفتاح تفعيل!", show_alert=True)
+        try:
+            await update.callback_query.edit_message_text(locked_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        except Exception:
+            await update.callback_query.message.reply_text(locked_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    elif update.message:
+        await update.message.reply_text(locked_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+
+
+
+# ==========================================
+# معالجات الأوامر الرئيسية (Command Handlers)
+# ==========================================
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """رسالة الترحيب والشاشة الرئيسية للبوت"""
+    user = update.effective_user
+    user_id = user.id if user else 0
+
+    # التحقق من صلاحية التفعيل
+    is_allowed, status_code, _ = check_user_access(user_id)
+    if not is_allowed:
+        await send_activation_required_message(update)
+        return
+
+    name = html.escape(user.first_name) if user and user.first_name else "طالبنا العزيز"
+    role_badge = " 👑 (المالك)" if is_admin(user_id) else ""
+    
+    welcome_text = (
+        f"👋 أهلاً بك يا <b>{name}</b>{role_badge} في <b>بوت مراقبة شواغر جامعة اليرموك</b> 🎓\n\n"
+        "💡 <b>وظيفة البوت:</b>\n"
+        "تزويد البوت برقم المادة ورقم الشعبة، وسيقوم بمراقبتها وفحصها باستمرار على مدار الساعة. "
+        "وفور قيام أي طالب بسحب المادة أو توفر مقعد شاغر، ستصلك رسالة تنبيه عاجلة فوراً لتسجيلها! ⚡\n\n"
+        "👇 <b>اختر من الخيارات التالية للبدء:</b>"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton("➕ إضافة مادة للمراقبة", callback_data="btn_add_course"),
+            InlineKeyboardButton("📋 موادي المراقبة", callback_data="btn_list_courses")
+        ],
+        [
+            InlineKeyboardButton("🔍 فحص سريع لشعبة", callback_data="btn_quick_check"),
+            InlineKeyboardButton("⚙️ حالة البوت", callback_data="btn_bot_status")
+        ],
+        [
+            InlineKeyboardButton("🌐 رابط نظام التسجيل (SIS)", url=config.YU_PORTAL_URL)
+        ]
+    ]
+
+    # إضافة زر لوحة تحكم الأدمن إذا كان هو المالك
+    if is_admin(user_id):
+        keyboard.append([InlineKeyboardButton("👑 لوحة تحكم الأدمن والمفاتيح", callback_data="btn_admin_panel")])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        try:
+            await update.callback_query.edit_message_text(welcome_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        except Exception:
+            await update.callback_query.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    elif update.message:
+        await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """دليل استخدام البوت"""
+    user_id = update.effective_user.id
+    is_allowed, _, _ = check_user_access(user_id)
+    if not is_allowed:
+        await send_activation_required_message(update)
+        return
+
+    admin_help = ""
+    if is_admin(user_id):
+        admin_help = (
+            "\n\n👑 <b>أوامر الأدمن (المالك):</b>\n"
+            "🔹 <code>/genkey [أيام] [أقصى_مواد]</code> - توليد مفتاح تفعيل جديد (مثال: <code>/genkey</code> أو <code>/genkey 30</code>)\n"
+            "🔹 <code>/genkeys [العدد] [أيام]</code> - توليد عدة مفاتيح دفعة واحدة\n"
+            "🔹 <code>/keys</code> - عرض كافة المفاتيح المتاحة والمستخدمة\n"
+            "🔹 <code>/users</code> - عرض المشتركين المفعّلين\n"
+            "🔹 <code>/stats</code> - إحصائيات عامة عن المشتركين والشعب\n"
+            "🔹 <code>/revoke [User_ID]</code> - إلغاء تفعيل مستخدم\n"
+        )
+
+    help_text = (
+        "📖 <b>دليل استخدام بوت شواغر اليرموك:</b>\n\n"
+        "🔹 <code>/track</code> - لبدء إضافة مادة ومراقبتها خطوة بخطوة.\n"
+        "🔹 <code>/list</code> - لعرض كل المواد والشعب التي تراقبها حالياً والتحكم بها.\n"
+        "🔹 <code>/check [رقم_المادة] [الشعبة]</code> - فحص فوري وسريع لمرة واحدة.\n"
+        "🔹 <code>/status</code> - تفاصيل وسرعة الفحص وعدد المواد المراقبة.\n"
+        "🔹 <code>/myid</code> - لمعرفة رقم حسابك (ID) وتفاصيل اشتراكك.\n"
+        "🔹 <code>/cancel</code> - إلغاء العملية الحالية والرجوع للقائمة الرئيسية.\n\n"
+        "💡 <b>مثال على الفحص السريع:</b>\n"
+        "<code>/check CS101 1</code>\n\n"
+        f"⚡ <b>تنبيه:</b> البوت يفحص الشعب تلقائياً كل {config.CHECK_INTERVAL_SECONDS} ثوانٍ ويرسل لك إشعاراً صوتياً فور فتح أي مقعد."
+        f"{admin_help}"
+    )
+    keyboard = [[InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(help_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """عرض حالة النظام والإحصائيات"""
+    user_id = update.effective_user.id
+    is_allowed, _, max_allowed = check_user_access(user_id)
+    if not is_allowed:
+        await send_activation_required_message(update)
+        return
+
+    user_courses = db.get_user_courses(user_id, active_only=True)
+    all_active = db.get_all_active_courses()
+    user_info = db.get_user_activation_details(user_id)
+    
+    sub_status = "👑 مالك البوت (دائم)" if is_admin(user_id) else "🟢 نشط ومفعّل"
+    if user_info and user_info.get("expires_at"):
+        sub_status = f"ينتهي في: <code>{user_info['expires_at']}</code>"
+    elif not is_admin(user_id) and user_info:
+        sub_status = "دائم (طوال الفصل)"
+
+    status_text = (
+        "📊 <b>حالة نظام المراقبة:</b>\n\n"
+        f"⏱️ <b>معدل تكرار الفحص:</b> كل <code>{config.CHECK_INTERVAL_SECONDS}</code> ثانية\n"
+        f"🎯 <b>وضع التشغيل:</b> <code>{'تجريبي (Demo Mode)' if config.DEMO_MODE else 'حي مباشر (Live SIS)'}</code>\n"
+        f"🔐 <b>حالة اشتراكك:</b> {sub_status}\n"
+        f"👤 <b>موادك المراقبة حالياً:</b> <code>{len(user_courses)}/{max_allowed}</code> مادة\n"
+        f"🌐 <b>إجمالي الشعب المراقبة في النظام:</b> <code>{len(all_active)}</code> شعبة\n"
+        f"🛡️ <b>نظام الحماية من الحظر:</b> مُفعل تلقائياً\n"
+    )
+    
+    keyboard = [[InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        try:
+            await update.callback_query.edit_message_text(status_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        except Exception:
+            await update.callback_query.message.reply_text(status_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    elif update.message:
+        await update.message.reply_text(status_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+
+
+
+# =======================================================
+# محادثة إضافة مادة جديدة للمراقبة (خطوتان فقط)
+# =======================================================
+
+async def start_tracking_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """بدء محادثة إضافة المادة"""
+    user_id = update.effective_user.id
+    is_allowed, _, max_allowed = check_user_access(user_id)
+    if not is_allowed:
+        await send_activation_required_message(update)
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    current_count = db.get_user_course_count(user_id)
+
+    if current_count >= max_allowed:
+        msg = f"⚠️ لقد وصلت للحد الأقصى من المواد المراقبة ({max_allowed} مواد). يرجى إيقاف أو حذف مادة من قائمتك أولاً عبر أمر /list."
+        if update.callback_query:
+            await update.callback_query.answer(msg, show_alert=True)
+        else:
+            await update.message.reply_text(msg)
+        return ConversationHandler.END
+
+
+    prompt_text = (
+        "📝 <b>الخطوة 1 من 2: إدخال رمز أو رقم المساق</b>\n\n"
+        "أرسل الآن رمز المادة أو رقمها (مثال: <code>CS 111L</code> أو <code>CS101</code> أو <code>FT200</code> أو <code>101330</code>):\n\n"
+        "<i>(يمكنك إرسال /cancel في أي وقت للإلغاء)</i>"
+    )
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        try:
+            await update.callback_query.edit_message_text(prompt_text, parse_mode=ParseMode.HTML)
+        except Exception:
+            await update.callback_query.message.reply_text(prompt_text, parse_mode=ParseMode.HTML)
+    elif update.message:
+        await update.message.reply_text(prompt_text, parse_mode=ParseMode.HTML)
+
+    return WAITING_COURSE_NO
+
+
+async def receive_course_no(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """استلام رقم/رمز المادة"""
+    course_no = update.message.text.strip().upper()
+    if len(course_no) < 2 or len(course_no) > 15:
+        await update.message.reply_text(
+            "⚠️ <b>رمز المادة غير صالح!</b>\n\n"
+            "يرجى إدخال رمز صحيح مثل <code>CS 111L</code> أو <code>CS101</code> أو <code>FT200</code> أو <code>101330</code>:",
+            parse_mode=ParseMode.HTML
+        )
+        return WAITING_COURSE_NO
+
+    context.user_data["course_no"] = course_no
+
+    await update.message.reply_text(
+        f"✅ تم حفظ رمز المادة: <b>{html.escape(course_no)}</b>\n\n"
+        "📝 <b>الخطوة 2 من 2: رقم الشعبة</b>\n"
+        "أرسل الآن <b>رقم الشعبة</b> التي تريد مراقبتها (مثال: <code>1</code> أو <code>2</code> أو <code>4</code>):",
+        parse_mode=ParseMode.HTML
+    )
+    return WAITING_SECTION_NO
+
+
+async def receive_section_no(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """استلام رقم الشعبة وبدء الفحص والمراقبة فوراً"""
+    section_no = update.message.text.strip()
+
+    if not section_no.isdigit():
+        await update.message.reply_text(
+            "⚠️ رقم الشعبة يجب أن يكون رقماً صحيحاً (مثال: <code>1</code> أو <code>2</code> أو <code>4</code>):",
+            parse_mode=ParseMode.HTML
+        )
+        return WAITING_SECTION_NO
+
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    course_no = context.user_data.get("course_no", "UNKNOWN")
+
+    # حفظ أولي في قاعدة البيانات
+    saved_course = db.add_tracked_course(
+        user_id=user_id,
+        chat_id=chat_id,
+        course_no=course_no,
+        course_name=course_no,
+        section_no=section_no
+    )
+
+    wait_msg = await update.message.reply_text(
+        f"⏳ جاري فحص حالة الشعبة <b>{html.escape(section_no)}</b> للمادة <b>{html.escape(course_no)}</b> في نظام اليرموك...",
+        parse_mode=ParseMode.HTML
+    )
+
+    # إجراء فحص أولي فوري
+    res: CourseCheckResult = await scraper.check_course(course_no, section_no)
+
+    # جلب الاسم الحقيقي للمادة من جدول الجامعة
+    real_name = res.course_name if res.course_name else course_no
+    db.update_course_status(
+        course_id=saved_course["id"],
+        capacity=res.capacity,
+        registered=res.registered,
+        available_seats=res.available_seats,
+        last_status=res.raw_status,
+        notified=1 if res.is_available else 0,
+        course_name=real_name
+    )
+
+    if res.error_message and res.raw_status in ["NOT_FOUND", "SECTION_NOT_FOUND", "ERROR"]:
+        msg = (
+            "⚠️ <b>تنبيه:</b>\n\n"
+            f"{html.escape(res.error_message)}\n\n"
+            "💡 <b>تلميح:</b> تأكد من إدخال رمز المادة ورقمها بدقة كما في جدول الجامعة (مثال: <code>CS 111L</code> أو <code>FT 200</code> أو <code>ACC 101</code>)."
+        )
+    elif res.is_available:
+        msg = (
+            "🎉 <b>خبر سار! الشعبة متاحة ويوجد مقاعد شاغرة حالياً!</b>\n\n"
+            f"📚 <b>المادة:</b> {html.escape(real_name)} (<code>{html.escape(res.course_no)}</code>)\n"
+            f"🔢 <b>الشعبة:</b> {html.escape(res.section_no)}\n"
+            f"🪑 <b>المقاعد الشاغرة:</b> 🔥 <code>{res.available_seats}</code> مقعد شاغر الآن!\n"
+            f"👨‍🏫 <b>المدرس:</b> {html.escape(res.instructor)}\n"
+            f"⏰ <b>الموعد:</b> {html.escape(res.schedule_time)}\n"
+            f"🏛️ <b>القاعة:</b> {html.escape(res.hall)}\n\n"
+            "⚡ ادخل الآن مباشرة وسجل المادة قبل أن تمتلئ!"
+        )
+    else:
+        msg = (
+            "🔒 <b>الشعبة ممتلئة حالياً (0 مقاعد شاغرة)</b>\n\n"
+            f"📚 <b>المادة:</b> {html.escape(real_name)} (<code>{html.escape(res.course_no)}</code>)\n"
+            f"🔢 <b>الشعبة:</b> {html.escape(res.section_no)}\n"
+            f"🪑 <b>المقاعد الشاغرة:</b> <code>0</code> (المادة ممتلئة)\n"
+            f"👨‍🏫 <b>المدرس:</b> {html.escape(res.instructor)}\n"
+            f"⏰ <b>الموعد:</b> {html.escape(res.schedule_time)}\n"
+            f"🏛️ <b>القاعة:</b> {html.escape(res.hall)}\n\n"
+            "🟢 <b>تم تفعيل المراقبة المستمرة بنجاح!</b>\n"
+            f"البوت يقوم الآن بفحص الشعبة كل <code>{config.CHECK_INTERVAL_SECONDS}</code> ثوانٍ في الخلفية، وسيرسل لك إشعاراً صوتياً وتنبيه فور قيام أي طالب بسحب المادة! 🚀"
+        )
+
+    keyboard = [
+        [
+            InlineKeyboardButton("📋 عرض موادي المراقبة", callback_data="btn_list_courses"),
+            InlineKeyboardButton("➕ إضافة مادة أخرى", callback_data="btn_add_course")
+        ],
+        [
+            InlineKeyboardButton("🌐 فتح بوابة التسجيل SIS", url=config.YU_PORTAL_URL)
+        ],
+        [
+            InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    try:
+        await wait_msg.edit_text(msg, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.warning(f"Error editing wait_msg with HTML: {e}")
+        await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+
+    return ConversationHandler.END
+
+
+async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """إلغاء عملية الإضافة"""
+    context.user_data.clear()
+    cancel_text = "❌ تم إلغاء العملية والعودة للقائمة الرئيسية."
+    keyboard = [[InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(cancel_text, reply_markup=reply_markup)
+    return ConversationHandler.END
+
+
+# ==========================================
+# قائمة المواد والتحكم بها (List & Controls)
+# ==========================================
+
+async def list_courses_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """عرض قائمة المواد المراقبة للمستخدم مع أزرار التحكم"""
+    user_id = update.effective_user.id
+    is_allowed, _, _ = check_user_access(user_id)
+    if not is_allowed:
+        await send_activation_required_message(update)
+        return
+
+    courses = db.get_user_courses(user_id)
+
+    if not courses:
+        empty_text = (
+            "📭 <b>لا توجد لديك أي مواد مراقبة حالياً.</b>\n\n"
+            "اضغط على الزر أدناه لإضافة مادتك الأولى وبدء المراقبة:"
+        )
+        keyboard = [
+            [InlineKeyboardButton("➕ إضافة مادة للمراقبة", callback_data="btn_add_course")],
+            [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        if update.callback_query:
+            await update.callback_query.answer()
+            try:
+                await update.callback_query.edit_message_text(empty_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+            except Exception:
+                await update.callback_query.message.reply_text(empty_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        elif update.message:
+            await update.message.reply_text(empty_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        return
+
+    message_text = "📋 <b>قائمة المواد والشعب المراقبة لديك:</b>\n\n"
+    keyboard = []
+
+    for idx, c in enumerate(courses, 1):
+        status_icon = "🟢" if c["is_active"] else "⏸️"
+        seat_status = f"({c['registered']}/{c['capacity']})" if c['capacity'] > 0 else ""
+        avail_badge = f"🔥 متوفر {c['available_seats']} مقعد!" if c['available_seats'] > 0 else "ممتلئة 🔒"
+        
+        c_name = html.escape(c['course_name']) if c['course_name'] else html.escape(c['course_no'])
+        message_text += (
+            f"<b>{idx}. {c_name}</b> (<code>{html.escape(c['course_no'])}</code>)\n"
+            f"   🔢 شعبة: <code>{html.escape(c['section_no'])}</code> | الحالة: {status_icon} {'مراقبة نشطة' if c['is_active'] else 'متوقفة'}\n"
+            f"   🪑 المقاعد: {avail_badge} {seat_status}\n\n"
+        )
+
+        toggle_btn = InlineKeyboardButton(
+            f"⏸️ إيقاف #{c['section_no']}" if c["is_active"] else f"▶️ تشغيل #{c['section_no']}",
+            callback_data=f"toggle_{c['id']}"
+        )
+        del_btn = InlineKeyboardButton(f"🗑️ حذف {c['course_no']}", callback_data=f"del_{c['id']}")
+        check_btn = InlineKeyboardButton(f"🔄 فحص", callback_data=f"check_{c['id']}")
+        
+        keyboard.append([check_btn, toggle_btn, del_btn])
+
+    keyboard.append([InlineKeyboardButton("➕ إضافة مادة جديدة", callback_data="btn_add_course")])
+    keyboard.append([InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")] )
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        try:
+            await update.callback_query.edit_message_text(message_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        except Exception:
+            await update.callback_query.message.reply_text(message_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    elif update.message:
+        await update.message.reply_text(message_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+
+
+async def check_command_direct(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """أمر الفحص الفوري المباشر: يدعم /check FT 200 2 أو /check FT200 2 أو /check CS101 1"""
+    user_id = update.effective_user.id
+    is_allowed, _, _ = check_user_access(user_id)
+    if not is_allowed:
+        await send_activation_required_message(update)
+        return
+
+    if not context.args or len(context.args) < 1:
+        help_msg = (
+            "⚠️ <b>صيغة الأمر:</b> <code>/check [رمز_المادة] [رقم_الشعبة]</code>\n\n"
+            "💡 <b>أمثلة:</b>\n"
+            "• <code>/check FT 200 2</code> (رمز FT، رقم 200، شعبة 2)\n"
+            "• <code>/check FT200 2</code>\n"
+            "• <code>/check CS101 1</code>"
+        )
+        await update.message.reply_text(help_msg, parse_mode=ParseMode.HTML)
+        return
+
+    if len(context.args) >= 3:
+        course_no = f"{context.args[0]} {context.args[1]}".upper()
+        section_no = context.args[2]
+    elif len(context.args) == 2:
+        course_no = context.args[0].upper()
+        section_no = context.args[1]
+    else:
+        await update.message.reply_text("⚠️ يرجى تحديد رقم الشعبة أيضاً، مثال: <code>/check FT 200 2</code>", parse_mode=ParseMode.HTML)
+        return
+
+    wait_msg = await update.message.reply_text(
+        f"⏳ جاري فحص الشعبة <b>{html.escape(section_no)}</b> للمادة <b>{html.escape(course_no)}</b>...",
+        parse_mode=ParseMode.HTML
+    )
+
+    res: CourseCheckResult = await scraper.check_course(course_no, section_no)
+
+    if res.error_message and res.raw_status in ["NOT_FOUND", "SECTION_NOT_FOUND", "ERROR"]:
+        result_text = (
+            "⚠️ <b>تنبيه:</b>\n\n"
+            f"{html.escape(res.error_message)}\n\n"
+            "💡 <b>مثال صحيح:</b> <code>/check CS 111L 4</code> أو <code>/check FT 200 2</code>"
+        )
+        keyboard = [[InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await wait_msg.edit_text(result_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        return
+
+    if res.is_available:
+        status_msg = f"🟢 <b>متوفر شواغر الآن ({res.available_seats} مقعد)!</b>"
+    else:
+        status_msg = "🔴 <b>الشعبة ممتلئة حالياً (0 مقاعد).</b>"
+
+    result_text = (
+        "📊 <b>نتيجة فحص الشعبة الحقيقية من اليرموك:</b>\n\n"
+        f"📚 <b>المادة:</b> {html.escape(res.course_name)} (<code>{html.escape(res.course_no)}</code>)\n"
+        f"🔢 <b>الشعبة:</b> {html.escape(res.section_no)}\n"
+        f"📌 <b>الحالة:</b> {status_msg}\n"
+        f"🪑 <b>المقاعد المتاحة:</b> <code>{res.available_seats}</code> مقعد شاغر\n"
+        f"👨‍🏫 <b>المدرس:</b> {html.escape(res.instructor)}\n"
+        f"⏰ <b>الموعد:</b> {html.escape(res.schedule_time)}\n"
+        f"🏛️ <b>القاعة:</b> {html.escape(res.hall)}\n"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("➕ مراقبة هذه الشعبة باستمرار", callback_data=f"track_quick_{course_no}_{section_no}")],
+        [InlineKeyboardButton("🌐 فتح SIS", url=config.YU_PORTAL_URL)],
+        [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await wait_msg.edit_text(result_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+
+
+# ==========================================
+# أوامر التفعيل ومعلومات الحساب (Activation)
+# ==========================================
+
+async def process_activation_key(update: Update, context: ContextTypes.DEFAULT_TYPE, user, key_input: str) -> None:
+    """معالجة والتحقق من كود التفعيل وتطبيقه على حساب المستخدم"""
+    user_id = user.id
+    username = user.username or ""
+    first_name = user.first_name or ""
+
+    success, message, key_info = db.activate_user_with_key(user_id, username, first_name, key_input)
+
+    if success:
+        exp_text = "دائم (طوال الفصل الدراسي)"
+        if key_info and key_info.get("expires_at"):
+            exp_text = f"ينتهي في: <code>{key_info['expires_at']}</code>"
+        
+        congrats_text = (
+            "🎉🎉 <b>ألف مبروك! تم تفعيل اشتراكك بنجاح!</b> 🎉🎉\n\n"
+            f"🔑 <b>كود التفعيل:</b> <code>{key_info.get('key_code', key_input)}</code>\n"
+            f"👤 <b>الحساب المفعّل:</b> {html.escape(first_name)} (<code>{user_id}</code>)\n"
+            f"⏳ <b>فترة الصلاحية:</b> {exp_text}\n"
+            f"📚 <b>عدد المواد المسموحة:</b> <code>{key_info.get('max_courses', 10)}</code> مواد\n\n"
+            "🚀 <b>تم فتح كافة خدمات البوت لك الآن!</b> يمكنك البدء بإضافة موادك لمراقبة المقاعد الشاغرة فوراً:"
+        )
+        keyboard = [
+            [
+                InlineKeyboardButton("➕ إضافة مادة للمراقبة", callback_data="btn_add_course"),
+                InlineKeyboardButton("📋 موادي المراقبة", callback_data="btn_list_courses")
+            ],
+            [
+                InlineKeyboardButton("🔍 فحص سريع لشعبة", callback_data="btn_quick_check"),
+                InlineKeyboardButton("⚙️ حالة البوت", callback_data="btn_bot_status")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        if update.message:
+            await update.message.reply_text(congrats_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        elif update.callback_query:
+            await update.callback_query.message.reply_text(congrats_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    else:
+        owner_handle, owner_url = config.get_owner_contact_info()
+        error_msg = (
+            f"{message}\n\n"
+            f"💡 <i>تأكد من كتابة الكود بشكل صحيح وبنفس الحروف، أو تواصل مع: <b>{owner_handle}</b> للحصول على مفتاح جديد.</i>"
+        )
+        keyboard = []
+        if owner_url:
+            keyboard.append([InlineKeyboardButton("💬 تواصل مع صاحب البوت", url=owner_url)])
+        reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+
+
+        if update.message:
+            await update.message.reply_text(error_msg, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        elif update.callback_query:
+            await update.callback_query.message.reply_text(error_msg, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+
+
+
+async def my_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """عرض معرف المستخدم وحالة حسابه"""
+    user = update.effective_user
+    user_id = user.id
+    is_admin_user = is_admin(user_id)
+    is_act, status_code, max_c = db.is_user_activated(user_id)
+    user_info = db.get_user_activation_details(user_id)
+
+    role_str = "👑 مالك / أدمن" if is_admin_user else ("🟢 مشترك مفعّل" if is_act else "🔒 غير مفعّل")
+    exp_str = "دائم"
+    if user_info and user_info.get("expires_at"):
+        exp_str = user_info["expires_at"]
+    elif not is_admin_user and not is_act:
+        exp_str = "غير مشترك"
+
+    msg = (
+        "🆔 <b>معلومات حسابك:</b>\n\n"
+        f"👤 <b>الاسم:</b> {html.escape(user.full_name)}\n"
+        f"🔢 <b>معرف الحساب (User ID):</b> <code>{user_id}</code> (اضغط للنسخ)\n"
+        f"🏷️ <b>اسم المستخدم:</b> @{user.username if user.username else 'لا يوجد'}\n"
+        f"🛡️ <b>الرتبة / الحالة:</b> {role_str}\n"
+        f"⏳ <b>صلاحية الاشتراك:</b> <code>{exp_str}</code>\n"
+        f"📚 <b>الحد الأقصى للمواد المراقبة:</b> <code>{max_c if is_act or is_admin_user else 0}</code> مواد\n"
+    )
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+
+
+async def activate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """أمر تفعيل المفتاح يدوياً: /activate YU-XXXX-XXXX-XXXX"""
+    user = update.effective_user
+    if not context.args or len(context.args) < 1:
+        await update.message.reply_text(
+            "🔑 <b>طريقة التفعيل:</b>\n"
+            "اكتب الأمر مع كود التفعيل بالشكل التالي:\n"
+            "<code>/activate YU-XXXX-XXXX-XXXX</code>\n\n"
+            "أو يمكنك إرسال الكود فقط في المحادثة مباشرة!",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    key_input = context.args[0].strip()
+    await process_activation_key(update, context, user, key_input)
+
+
+# ==========================================
+# أوامر لوحة تحكم الأدمن (Admin Commands)
+# ==========================================
+
+async def admin_genkey_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """أمر الأدمن لتوليد مفتاح تفعيل جديد: /genkey [days] [max_courses]"""
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ هذا الأمر خاص بمالك البوت فقط!")
+        return
+
+    duration_days = 0
+    max_courses = config.MAX_COURSES_PER_USER
+
+    if context.args:
+        try:
+            if len(context.args) >= 1 and context.args[0].isdigit():
+                duration_days = int(context.args[0])
+            if len(context.args) >= 2 and context.args[1].isdigit():
+                max_courses = int(context.args[1])
+        except Exception:
+            pass
+
+    key_code = db.create_activation_key(duration_days=duration_days, max_courses=max_courses)
+    dur_desc = f"{duration_days} يوم" if duration_days > 0 else "دائم (طوال الفصل)"
+
+    response_text = (
+        "👑 <b>تم توليد مفتاح تفعيل جديد بنجاح!</b>\n\n"
+        "📋 <b>كود التفعيل (اضغط عليه للنسخ):</b>\n"
+        f"<code>{key_code}</code>\n\n"
+        f"⏱️ <b>المدة:</b> <code>{dur_desc}</code>\n"
+        f"📚 <b>الحد الأقصى للمواد:</b> <code>{max_courses}</code> مواد\n"
+        "🔒 <b>الاستخدام:</b> لحساب وتيليجرام واحد فقط لمرة واحدة.\n\n"
+        "💬 <b>رسالة جاهزة للإرسال للزبون:</b>\n"
+        "➖➖➖➖➖➖➖➖➖➖\n"
+        f"أهلاً بك! تم إنشاء اشتراكك في بوت شواغر اليرموك 🎓\n\n"
+        f"🔑 كود التفعيل الخاص بك:\n<code>{key_code}</code>\n\n"
+        "طريقة التفعيل: افتح البوت وأرسل هذا الكود مباشرة لتفعيل حسابك! ⚡\n"
+        "➖➖➖➖➖➖➖➖➖➖"
+    )
+    await update.message.reply_text(response_text, parse_mode=ParseMode.HTML)
+
+
+async def admin_genkeys_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """توليد عدة مفاتيح بالجملة: /genkeys <count> [days]"""
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ هذا الأمر خاص بمالك البوت فقط!")
+        return
+
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("⚠️ يرجى تحديد العدد، مثال: <code>/genkeys 5</code> أو <code>/genkeys 5 30</code>", parse_mode=ParseMode.HTML)
+        return
+
+    count = min(int(context.args[0]), 20)
+    days = int(context.args[1]) if len(context.args) > 1 and context.args[1].isdigit() else 0
+
+    keys = db.create_bulk_activation_keys(count=count, duration_days=days)
+    dur_desc = f"{days} يوم" if days > 0 else "دائم"
+
+    text = f"👑 <b>تم توليد {len(keys)} مفاتيح جديدة ({dur_desc}):</b>\n\n"
+    for i, k in enumerate(keys, 1):
+        text += f"{i}. <code>{k}</code>\n"
+
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def admin_keys_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """عرض قائمة المفاتيح المتاحة والمستخدمة"""
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ هذا الأمر خاص بمالك البوت فقط!")
+        return
+
+    filter_type = context.args[0].lower() if context.args else None
+    keys = db.get_all_keys(filter_status=filter_type, limit=20)
+    stats = db.get_system_stats()
+
+    text = (
+        "🔑 <b>لوحة إدارة المفاتيح:</b>\n\n"
+        f"🟢 المفاتيح المتاحة للبيع: <code>{stats['unused_keys']}</code>\n"
+        f"🔴 المفاتيح المباعة/المستخدمة: <code>{stats['used_keys']}</code>\n"
+        f"👥 إجمالي المستخدمين المفعّلين: <code>{stats['active_users']}</code>\n\n"
+        "<b>آخر المفاتيح:</b>\n"
+    )
+
+    if not keys:
+        text += "<i>لا توجد مفاتيح حالياً. استخدم /genkey لتوليد مفتاح.</i>"
+    else:
+        for k in keys:
+            status_icon = "🔴 مستخدم" if k["is_used"] else "🟢 متاح"
+            user_info = f" (من @{k['used_by_username'] or k['used_by_user_id']})" if k["is_used"] else ""
+            dur_info = f"{k['duration_days']} يوم" if k["duration_days"] > 0 else "دائم"
+            text += f"• <code>{k['key_code']}</code> | {status_icon} | {dur_info}{user_info}\n"
+
+    text += "\n💡 <i>استخدم <code>/genkey</code> لتوليد مفتاح جديد، أو <code>/revoke [ID]</code> لإلغاء تفعيل حساب.</i>"
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def admin_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """عرض قائمة المستخدمين المفعّلين"""
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ هذا الأمر خاص بمالك البوت فقط!")
+        return
+
+    users = db.get_all_activated_users()
+    if not users:
+        await update.message.reply_text("📭 لا يوجد أي مستخدمين مفعّلين حالياً.", parse_mode=ParseMode.HTML)
+        return
+
+    text = f"👥 <b>قائمة المستخدمين المفعّلين ({len(users)}):</b>\n\n"
+    for idx, u in enumerate(users[:30], 1):
+        status_icon = "🟢" if u["is_active"] else "🔴"
+        u_name = f"@{u['username']}" if u["username"] else (u["first_name"] or "مستخدم")
+        exp = u["expires_at"] if u["expires_at"] else "دائم"
+        text += f"{idx}. {status_icon} <b>{html.escape(u_name)}</b> (<code>{u['user_id']}</code>)\n   🔑 <code>{u['key_code']}</code> | الصلاحية: {exp}\n\n"
+
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def admin_revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """إلغاء تفعيل مستخدم: /revoke <user_id>"""
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ هذا الأمر خاص بمالك البوت فقط!")
+        return
+
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("⚠️ يرجى كتابة الـ User ID الخاص بالمستخدم، مثال: <code>/revoke 123456789</code>", parse_mode=ParseMode.HTML)
+        return
+
+    target_id = int(context.args[0])
+    success = db.revoke_user_activation(target_id)
+    if success:
+        await update.message.reply_text(f"✅ تم إلغاء تفعيل المستخدم <code>{target_id}</code> وإيقاف مراقبته بنجاح!", parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text(f"⚠️ لم يتم العثور على مستخدم مفعّل برقم <code>{target_id}</code>.", parse_mode=ParseMode.HTML)
+
+
+async def admin_delkey_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """حذف مفتاح تفعيل من النظام: /delkey <key_code>"""
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ هذا الأمر خاص بمالك البوت فقط!")
+        return
+
+    if not context.args or len(context.args) < 1:
+        await update.message.reply_text(
+            "⚠️ <b>طريقة حذف مفتاح:</b>\n"
+            "اكتب الأمر مع كود المفتاح بالشكل التالي:\n"
+            "<code>/delkey YU-XXXX-XXXX-XXXX</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    target_key = context.args[0].strip().upper()
+    success = db.delete_key(target_key)
+    if success:
+        await update.message.reply_text(f"🗑️ تم حذف المفتاح <code>{target_key}</code> من النظام بنجاح!", parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text(f"⚠️ لم يتم العثور على المفتاح <code>{target_key}</code> في قاعدة البيانات.", parse_mode=ParseMode.HTML)
+
+
+
+async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """عرض إحصائيات النظام الشاملة للأدمن"""
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ هذا الأمر خاص بمالك البوت فقط!")
+        return
+
+    stats = db.get_system_stats()
+    text = (
+        "👑 <b>لوحة تحكم مالك البوت:</b>\n\n"
+        f"👥 <b>المستخدمين المشتركين:</b> <code>{stats['active_users']}</code> مستخدم\n"
+        f"🟢 <b>المفاتيح المتاحة للبيع:</b> <code>{stats['unused_keys']}</code> مفتاح\n"
+        f"🔴 <b>المفاتيح المستخدمة:</b> <code>{stats['used_keys']}</code> مفتاح\n"
+        f"🔑 <b>إجمالي المفاتيح:</b> <code>{stats['total_keys']}</code> مفتاح\n"
+        f"📚 <b>إجمالي الشعب المراقبة حالياً:</b> <code>{stats['active_courses']}</code> شعبة\n"
+        f"⏱️ <b>معدل الفحص الدوري:</b> كل <code>{config.CHECK_INTERVAL_SECONDS}</code> ثوانٍ\n"
+    )
+    keyboard = [
+        [
+            InlineKeyboardButton("🔑 توليد مفتاح جديد", callback_data="btn_admin_genkey"),
+            InlineKeyboardButton("📋 عرض المفاتيح", callback_data="btn_admin_keys")
+        ],
+        [
+            InlineKeyboardButton("👥 قائمة المشتركين", callback_data="btn_admin_users"),
+            InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        try:
+            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        except Exception:
+            await update.callback_query.message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    elif update.message:
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+
+
+async def handle_general_text_and_activation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """معالجة الرسائل النصية المباشرة (مثل إدخال كود التفعيل)"""
+    if not update.message or not update.message.text:
+        return
+
+    text = update.message.text.strip()
+    user = update.effective_user
+    user_id = user.id
+
+    # إذا كان المستخدم مفعلاً بالفعل، لا داعي لمعالجة التفعيل أو إرسال رسائل متكررة
+    is_act, _, _ = check_user_access(user_id)
+    if is_act:
+        return
+
+    # المستخدم غير مفعّل، نفحص إذا كان النص المدخل هو كود تفعيل
+    await process_activation_key(update, context, user, text)
+
+
+# ==========================================
+# معالج ضغطات الأزرار (Callback Query Handler)
+# ==========================================
+
+async def callback_query_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """توجيه التفاعلات مع الأزرار"""
+    query = update.callback_query
+    data = query.data
+    user_id = update.effective_user.id
+
+    is_allowed, _, _ = check_user_access(user_id)
+    if not is_allowed and not data.startswith("btn_activate"):
+        await send_activation_required_message(update)
+        return
+
+    if data == "btn_main_menu":
+        await start_command(update, context)
+
+    elif data == "btn_add_course":
+        await start_tracking_conversation(update, context)
+
+    elif data == "btn_list_courses":
+        await list_courses_handler(update, context)
+
+    elif data == "btn_bot_status":
+        await status_command(update, context)
+
+    elif data == "btn_admin_panel" or data == "btn_admin_stats":
+        if is_admin(user_id):
+            await admin_stats_command(update, context)
+        else:
+            await query.answer("⛔ هذا القسم خاص بالمالك فقط!", show_alert=True)
+
+    elif data == "btn_admin_genkey":
+        if is_admin(user_id):
+            key_code = db.create_activation_key(duration_days=0, max_courses=config.MAX_COURSES_PER_USER)
+            await query.answer("✅ تم توليد مفتاح جديد بنجاح!")
+            resp_msg = (
+                "👑 <b>تم توليد مفتاح دائم جديد:</b>\n\n"
+                f"<code>{key_code}</code>\n\n"
+                "<i>(اضغط عليه للنسخ وإرساله للمشتري)</i>"
+            )
+            await query.message.reply_text(resp_msg, parse_mode=ParseMode.HTML)
+            await admin_stats_command(update, context)
+        else:
+            await query.answer("⛔ هذا القسم خاص بالمالك فقط!", show_alert=True)
+
+    elif data == "btn_admin_keys":
+        if is_admin(user_id):
+            await admin_keys_command(update, context)
+        else:
+            await query.answer("⛔ هذا القسم خاص بالمالك فقط!", show_alert=True)
+
+    elif data == "btn_admin_users":
+        if is_admin(user_id):
+            await admin_users_command(update, context)
+        else:
+            await query.answer("⛔ هذا القسم خاص بالمالك فقط!", show_alert=True)
+
+    elif data == "btn_quick_check":
+        await query.answer()
+        quick_check_text = (
+            "🔍 <b>الفحص السريع لشعبة:</b>\n\n"
+            "أرسل أمر الفحص في المحادثة بالشكل التالي:\n"
+            "<code>/check CS101 1</code>\n"
+            "أو\n"
+            "<code>/check FT 200 2</code>\n\n"
+            "⚡ سيقوم البوت بفحص الشعبة فوراً وعرض تفاصيل المدرس والقاعة وعدد المقاعد."
+        )
+        keyboard = [
+            [InlineKeyboardButton("➕ إضافة مادة للمراقبة", callback_data="btn_add_course")],
+            [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")]
+        ]
+        await query.edit_message_text(quick_check_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+
+    elif data.startswith("toggle_"):
+        course_id = int(data.split("_")[1])
+        course = db.get_course_by_id(course_id, user_id)
+        if course:
+            if course["is_active"]:
+                db.stop_tracking_course(course_id, user_id)
+                await query.answer("⏸️ تم إيقاف مراقبة الشعبة مؤقتاً")
+            else:
+                db.update_course_status(course_id, course["capacity"], course["registered"], course["available_seats"], course["last_status"], notified=0)
+                with db.get_connection() as conn:
+                    conn.execute("UPDATE tracked_courses SET is_active = 1 WHERE id = ?", (course_id,))
+                await query.answer("▶️ تم استئناف المراقبة بنجاح!")
+            await list_courses_handler(update, context)
+
+    elif data.startswith("del_"):
+        course_id = int(data.split("_")[1])
+        db.delete_course(course_id, user_id)
+        await query.answer("🗑️ تم حذف المادة من قائمة المراقبة")
+        await list_courses_handler(update, context)
+
+    elif data.startswith("check_"):
+        course_id = int(data.split("_")[1])
+        course = db.get_course_by_id(course_id, user_id)
+        if course:
+            await query.answer("🔄 جاري الفحص...")
+            res = await scraper.check_course(course["course_no"], course["section_no"], course["course_name"])
+            db.update_course_status(course_id, res.capacity, res.registered, res.available_seats, res.raw_status)
+            alert_text = f"المسجلين: {res.registered}/{res.capacity} | الشواغر: {res.available_seats}"
+            await query.answer(alert_text, show_alert=True)
+            await list_courses_handler(update, context)
+
+    elif data.startswith("track_quick_"):
+        parts = data.split("_")
+        course_no = parts[2]
+        section_no = parts[3]
+        db.add_tracked_course(user_id, update.effective_chat.id, course_no, course_no, section_no)
+        await query.answer("🟢 تم تفعيل مراقبة الشعبة بنجاح!", show_alert=True)
+        await list_courses_handler(update, context)
+
+
+# ====================================================================
+# دورة الفحص التلقائي بالخلفية (Background Repeating Scanner Job)
+# ====================================================================
+
+async def background_course_scanner(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    وظيفة تعمل باستمرار في الخلفية كل X ثانية:
+    تفحص كافة المواد المراقبة لجميع الطلاب، وترسل تنبيهاً فورياً عند توفر مقعد!
+    """
+    active_courses = db.get_all_active_courses()
+    if not active_courses:
+        return
+
+    for c in active_courses:
+        try:
+            res: CourseCheckResult = await scraper.check_course(
+                c["course_no"],
+                c["section_no"],
+                c["course_name"]
+            )
+
+            # الحالة 1: توفر مقاعد شاغرة لأول مرة وإشعار المستخدم
+            if res.is_available and c["notified"] == 0:
+                logger.info(f"🔥 شاغر متوفر في المادة {c['course_no']} شعبة {c['section_no']} للمستخدم {c['user_id']}")
+                
+                alert_text = (
+                    "🚨🚨 <b>تنبيه عاجل: توفر مقعد شاغر!</b> 🚨🚨\n\n"
+                    "يا بطل، تم توفر مقعد الآن في مادتك المراقبة:\n\n"
+                    f"📚 <b>المادة:</b> {html.escape(res.course_name)} (<code>{html.escape(res.course_no)}</code>)\n"
+                    f"🔢 <b>الشعبة:</b> {html.escape(res.section_no)}\n"
+                    f"🪑 <b>المقاعد المتاحة الآن:</b> 🔥 <code>{res.available_seats}</code> مقعد شاغر! (المسجلين: {res.registered}/{res.capacity})\n"
+                    f"👨‍🏫 <b>المدرس:</b> {html.escape(res.instructor)}\n"
+                    f"⏰ <b>الموعد:</b> {html.escape(res.schedule_time)}\n"
+                    f"🏛️ <b>القاعة:</b> {html.escape(res.hall)}\n\n"
+                    "⚡ <b>سارع فوراً بالدخول إلى نظام التسجيل (SIS) وسجل المادة قبل أن يأخذها طالب آخر!</b>"
+                )
+
+                keyboard = [
+                    [InlineKeyboardButton("🌐 الدخول السريع لنظام SIS", url=config.YU_PORTAL_URL)],
+                    [InlineKeyboardButton("⏹️ إيقاف مراقبة هذه المادة", callback_data=f"toggle_{c['id']}")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                sent_msg = await context.bot.send_message(
+                    chat_id=c["chat_id"],
+                    text=alert_text,
+                    reply_markup=reply_markup,
+                    parse_mode=ParseMode.HTML
+                )
+
+                db.update_course_status(
+                    c["id"],
+                    res.capacity,
+                    res.registered,
+                    res.available_seats,
+                    res.raw_status,
+                    notified=1,
+                    course_name=res.course_name or c.get("course_name"),
+                    last_alert_msg_id=sent_msg.message_id
+                )
+
+            # الحالة 2: الشعبة لا تزال مفتوحة ولكن عدد المقاعد تغير (تحديث فوري Real-time)
+            elif res.is_available and c["notified"] == 1:
+                if res.available_seats != c.get("available_seats") or res.registered != c.get("registered"):
+                    logger.info(f"🔄 تحديث حي لعدد المقاعد للمادة {c['course_no']} شعبة {c['section_no']}: {c.get('available_seats')} -> {res.available_seats}")
+                    msg_id = c.get("last_alert_msg_id")
+                    if msg_id:
+                        try:
+                            updated_alert_text = (
+                                "🚨🚨 <b>تنبيه عاجل: توفر مقعد شاغر! (تحديث فوري ⚡)</b> 🚨🚨\n\n"
+                                "يا بطل، المقاعد المتاحة الآن في مادتك المراقبة:\n\n"
+                                f"📚 <b>المادة:</b> {html.escape(res.course_name)} (<code>{html.escape(res.course_no)}</code>)\n"
+                                f"🔢 <b>الشعبة:</b> {html.escape(res.section_no)}\n"
+                                f"🪑 <b>المقاعد المتاحة الآن:</b> 🔥 <code>{res.available_seats}</code> مقعد شاغر! (المسجلين: {res.registered}/{res.capacity})\n"
+                                f"👨‍🏫 <b>المدرس:</b> {html.escape(res.instructor)}\n"
+                                f"⏰ <b>الموعد:</b> {html.escape(res.schedule_time)}\n"
+                                f"🏛️ <b>القاعة:</b> {html.escape(res.hall)}\n\n"
+                                "⚡ <b>سارع فوراً بالدخول إلى نظام التسجيل (SIS) وسجل المادة قبل أن يأخذها طالب آخر!</b>"
+                            )
+                            keyboard = [
+                                [InlineKeyboardButton("🌐 الدخول السريع لنظام SIS", url=config.YU_PORTAL_URL)],
+                                [InlineKeyboardButton("⏹️ إيقاف مراقبة هذه المادة", callback_data=f"toggle_{c['id']}")]
+                            ]
+                            await context.bot.edit_message_text(
+                                chat_id=c["chat_id"],
+                                message_id=msg_id,
+                                text=updated_alert_text,
+                                reply_markup=InlineKeyboardMarkup(keyboard),
+                                parse_mode=ParseMode.HTML
+                            )
+                        except Exception as e:
+                            logger.debug(f"Could not edit real-time alert message: {e}")
+
+                    db.update_course_status(
+                        c["id"],
+                        res.capacity,
+                        res.registered,
+                        res.available_seats,
+                        res.raw_status,
+                        notified=1,
+                        course_name=res.course_name or c.get("course_name")
+                    )
+
+            # الحالة 3: كانت الشعبة مفتوحة وتم تنبيه الطالب، والآن امتلأت (تحديث رسالة التنبيه + إشعار بالامتلاء)
+            elif not res.is_available and c["notified"] == 1:
+                logger.info(f"❌ الشعبة {c['course_no']} شعبة {c['section_no']} أصبحت ممتلئة بعد أن كانت متاحة (للمستخدم {c['user_id']})")
+                
+                # تحديث رسالة التنبيه السابقة في المحادثة مباشرة إن وجدت
+                msg_id = c.get("last_alert_msg_id")
+                if msg_id:
+                    try:
+                        closed_alert_text = (
+                            "🔒 <b>انتهت المقاعد! امتلأت هذه الشعبة بالكامل 🏃‍♂️💨</b>\n\n"
+                            f"📚 <b>المادة:</b> {html.escape(res.course_name)} (<code>{html.escape(res.course_no)}</code>)\n"
+                            f"🔢 <b>الشعبة:</b> {html.escape(res.section_no)}\n"
+                            f"🔒 <b>المقاعد المتاحة:</b> <code>0</code> (المادة ممتلئة)\n\n"
+                            "🔄 <b>المراقبة مستمرة بدون توقف 🚀</b>\n"
+                            f"البوت مكمل فحص للشعبة كل <code>{config.CHECK_INTERVAL_SECONDS}</code> ثوانٍ بالخلفية، وأول ما يتوفر مقعد جديد رح نرجع نبعثلك تنبيه فوراً! ⚡"
+                        )
+                        keyboard = [
+                            [InlineKeyboardButton("🌐 فتح بوابة التسجيل SIS", url=config.YU_PORTAL_URL)],
+                            [InlineKeyboardButton("⏹️ إيقاف مراقبة هذه المادة", callback_data=f"toggle_{c['id']}")]
+                        ]
+                        await context.bot.edit_message_text(
+                            chat_id=c["chat_id"],
+                            message_id=msg_id,
+                            text=closed_alert_text,
+                            reply_markup=InlineKeyboardMarkup(keyboard),
+                            parse_mode=ParseMode.HTML
+                        )
+                    except Exception as e:
+                        logger.debug(f"Could not edit message on close: {e}")
+
+                missed_text = (
+                    "❌ <b>راحت عليك! في حد سبقك وسجل الشعبة 🏃‍♂️💨</b>\n\n"
+                    f"📚 <b>المادة:</b> {html.escape(res.course_name)} (<code>{html.escape(res.course_no)}</code>)\n"
+                    f"🔢 <b>الشعبة:</b> {html.escape(res.section_no)}\n"
+                    f"🔒 <b>الحالة:</b> الشعبة رجعت فل وممتلئة حالياً (0 مقاعد شاغرة).\n\n"
+                    "🔄 <b>لا تقلق! المراقبة مستمرة بدون توقف 🚀</b>\n"
+                    f"البوت مكمل فحص للشعبة كل <code>{config.CHECK_INTERVAL_SECONDS}</code> ثوانٍ بالخلفية، وأول ما طالب يسحبها أو يتوفر أي مقعد شاغر من جديد رح نرجع نبعثلك مسج فوراً! ⚡"
+                )
+
+                keyboard = [
+                    [InlineKeyboardButton("🌐 فتح بوابة التسجيل SIS", url=config.YU_PORTAL_URL)],
+                    [InlineKeyboardButton("⏹️ إيقاف مراقبة هذه المادة", callback_data=f"toggle_{c['id']}")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                await context.bot.send_message(
+                    chat_id=c["chat_id"],
+                    text=missed_text,
+                    reply_markup=reply_markup,
+                    parse_mode=ParseMode.HTML
+                )
+
+                db.update_course_status(
+                    c["id"],
+                    res.capacity,
+                    res.registered,
+                    res.available_seats,
+                    res.raw_status,
+                    notified=0,
+                    course_name=res.course_name or c.get("course_name"),
+                    last_alert_msg_id=None
+                )
+
+            # الحالة 4: تحديث البيانات العادية في حالة عدم توفر مقاعد
+            else:
+                db.update_course_status(
+                    c["id"],
+                    res.capacity,
+                    res.registered,
+                    res.available_seats,
+                    res.raw_status,
+                    course_name=res.course_name or c.get("course_name")
+                )
+
+            await asyncio.sleep(0.1)
+
+        except Exception as e:
+            logger.error(f"خطأ أثناء فحص المادة {c.get('course_no')}: {e}")
+
+
+# ==========================================
+# تشغيل وتهيئة البوت (Main Entrypoint)
+# ==========================================
+
+def main() -> None:
+    """تهيئة وتشغيل البوت"""
+    # تهيئة قاعدة البيانات
+    db.init_db()
+
+    if not config.BOT_TOKEN or config.BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
+        print("\n" + "=" * 60)
+        print("⚠️ تنبيه: يرجى وضع التوكن الخاص ببوت التيليجرام في ملف .env أولاً!")
+        print("=" * 60 + "\n")
+        return
+
+    # بناء تطبيق التيليجرام مع تفعيل الـ JobQueue
+    application = Application.builder().token(config.BOT_TOKEN).build()
+
+    # تشغيل خادم الفحص الصحي لدعم منصات السحابة (Render / Koyeb) في ثريد منفصل
+    threading.Thread(target=start_health_server, daemon=True).start()
+
+    # محادثة إضافة مادة للمراقبة (خطوتان فقط: رقم المادة -> رقم الشعبة)
+    conv_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler("track", start_tracking_conversation),
+            CallbackQueryHandler(start_tracking_conversation, pattern="^btn_add_course$")
+        ],
+        states={
+            WAITING_COURSE_NO: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_course_no)
+            ],
+            WAITING_SECTION_NO: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_section_no)
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel_conversation),
+            CommandHandler("start", start_command),
+            CommandHandler("list", list_courses_handler),
+            CommandHandler("help", help_command)
+        ],
+        allow_reentry=True,
+        per_message=False
+    )
+
+    # تسجيل المعالجات (Handlers)
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("list", list_courses_handler))
+    application.add_handler(CommandHandler("check", check_command_direct))
+    application.add_handler(CommandHandler("myid", my_id_command))
+    application.add_handler(CommandHandler("activate", activate_command))
+    
+    # أوامر الأدمن
+    application.add_handler(CommandHandler("genkey", admin_genkey_command))
+    application.add_handler(CommandHandler("genkeys", admin_genkeys_command))
+    application.add_handler(CommandHandler("keys", admin_keys_command))
+    application.add_handler(CommandHandler("users", admin_users_command))
+    application.add_handler(CommandHandler("revoke", admin_revoke_command))
+    application.add_handler(CommandHandler("delkey", admin_delkey_command))
+    application.add_handler(CommandHandler("stats", admin_stats_command))
+    application.add_handler(CommandHandler("admin", admin_stats_command))
+
+
+    application.add_handler(conv_handler)
+    application.add_handler(CallbackQueryHandler(callback_query_router))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_general_text_and_activation))
+
+    # جدولة دورة الفحص الدوري في الخلفية
+    job_queue = application.job_queue
+    job_queue.run_repeating(
+        background_course_scanner,
+        interval=config.CHECK_INTERVAL_SECONDS,
+        first=5
+    )
+
+    # تسجيل معالج الأخطاء العام
+    application.add_error_handler(global_error_handler)
+
+    print("=" * 60)
+    print("🚀 تم تشغيل بوت مراقبة شواغر جامعة اليرموك بنجاح!")
+    print(f"⏱️ الفحص الدوري يعمل كل {config.CHECK_INTERVAL_SECONDS} ثوانٍ.")
+    print(f"🎯 وضع التشغيل: {'تجريبي (Demo Mode)' if config.DEMO_MODE else 'حي مباشر (Live SIS)'}")
+    print(f"🔐 نظام مفاتيح التفعيل: {'مُفعل 🔒' if config.REQUIRE_ACTIVATION else 'معطل'}")
+    print(f"👑 معرفات الأدمن: {config.ADMIN_IDS if config.ADMIN_IDS else 'لم يتم تعيين ADMIN_ID في .env'}")
+    print("=" * 60)
+
+    # بدء استقبال التحديثات مع حماية من التعارض أثناء التبديل على السحابة
+    while True:
+        try:
+            application.run_polling(drop_pending_updates=True, close_loop=False)
+            break
+        except telegram.error.Conflict:
+            logger.warning("⏳ جاري انتظار إغلاق الجلسة القديمة للبوت على السيرفر (8 ثوانٍ)...")
+            time.sleep(8)
+        except Exception as e:
+            logger.error(f"تنبيه Polling: {e}")
+            time.sleep(5)
+
+
+if __name__ == "__main__":
+    main()
+
+
