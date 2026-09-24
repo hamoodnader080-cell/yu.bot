@@ -5,6 +5,7 @@ import os
 import sys
 import time
 import threading
+from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Optional, Tuple, Dict, Any, List
 
@@ -100,6 +101,49 @@ def check_user_access(user_id: int) -> Tuple[bool, str, int]:
     if not config.REQUIRE_ACTIVATION or is_admin(user_id):
         return True, "ACTIVE", config.MAX_COURSES_PER_USER
     return db.is_user_activated(user_id)
+
+
+def format_remaining_time(expires_at_val: Any) -> str:
+    """حساب وتنسيق الوقت المتبقي الحي (Real-time Timer) بدون تاريخ ثابت"""
+    if not expires_at_val:
+        return "دائم ومفتوح ♾️ (طوال الفصل)"
+    try:
+        if isinstance(expires_at_val, str):
+            clean_str = expires_at_val.strip()
+            exp_dt = None
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                try:
+                    exp_dt = datetime.strptime(clean_str[:19], fmt)
+                    break
+                except ValueError:
+                    continue
+            if not exp_dt:
+                return "دائم ومفتوح ♾️"
+        elif isinstance(expires_at_val, datetime):
+            exp_dt = expires_at_val
+        else:
+            return "دائم ومفتوح ♾️"
+
+        now = datetime.now()
+        diff = exp_dt - now
+        if diff.total_seconds() <= 0:
+            return "❌ منتهي الصلاحية"
+
+        days = diff.days
+        hours, remainder = divmod(diff.seconds, 3600)
+        minutes, _ = divmod(remainder, 60)
+
+        parts = []
+        if days > 0:
+            parts.append(f"{days} يوم")
+        if hours > 0:
+            parts.append(f"{hours} ساعة")
+        if minutes > 0 or not parts:
+            parts.append(f"{minutes} دقيقة")
+
+        return " و ".join(parts) + " ⏳"
+    except Exception:
+        return "دائم ومفتوح ♾️"
 
 
 async def send_to_log_channel(context: ContextTypes.DEFAULT_TYPE, log_text: str) -> None:
@@ -277,11 +321,12 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     all_active = db.get_all_active_courses()
     user_info = db.get_user_activation_details(user_id)
     
-    sub_status = "👑 مالك البوت (دائم)" if is_admin(user_id) else "🟢 نشط ومفعّل"
-    if user_info and user_info.get("expires_at"):
-        sub_status = f"ينتهي في: <code>{user_info['expires_at']}</code>"
-    elif not is_admin(user_id) and user_info:
-        sub_status = "دائم (طوال الفصل)"
+    if is_admin(user_id):
+        sub_status = "👑 مالك البوت (دائم ♾️)"
+    elif is_allowed:
+        sub_status = format_remaining_time(user_info.get("expires_at") if user_info else None)
+    else:
+        sub_status = "🔒 غير مفعّل"
 
     status_text = (
         "📊 <b>حالة نظام المراقبة:</b>\n\n"
@@ -666,16 +711,19 @@ async def process_activation_key(update: Update, context: ContextTypes.DEFAULT_T
             f"👤 <b>الطالب:</b> {u_info}\n"
             f"🎟️ <b>المفتاح:</b> <code>{key_info.get('key_code', key_input)}</code>"
         )
-        exp_text = "دائم (طوال الفصل الدراسي)"
+        exp_text = "دائم ومفتوح ♾️ (طوال الفصل)"
         if key_info and key_info.get("expires_at"):
             exp_text = f"ينتهي في: <code>{key_info['expires_at']}</code>"
+
+        max_c_val = key_info.get('max_courses', 10) if key_info else 10
+        max_c_text = "غير محدود ♾️ (كافة المواد)" if max_c_val >= 99 else f"{max_c_val} مواد"
         
         congrats_text = (
             "🎉🎉 <b>ألف مبروك! تم تفعيل اشتراكك بنجاح!</b> 🎉🎉\n\n"
             f"🔑 <b>كود التفعيل:</b> <code>{key_info.get('key_code', key_input)}</code>\n"
             f"👤 <b>الحساب المفعّل:</b> {html.escape(first_name)} (<code>{user_id}</code>)\n"
-            f"⏳ <b>فترة الصلاحية:</b> {exp_text}\n"
-            f"📚 <b>عدد المواد المسموحة:</b> <code>{key_info.get('max_courses', 10)}</code> مواد\n\n"
+            f"⏳ <b>فترة الصلاحية:</b> <code>{exp_text}</code>\n"
+            f"📚 <b>عدد المواد المسموحة:</b> <code>{max_c_text}</code>\n\n"
             "🚀 <b>تم فتح كافة خدمات البوت لك الآن!</b> يمكنك البدء بإضافة موادك لمراقبة المقاعد الشاغرة فوراً:"
         )
         keyboard = [
@@ -704,12 +752,10 @@ async def process_activation_key(update: Update, context: ContextTypes.DEFAULT_T
             keyboard.append([InlineKeyboardButton("💬 تواصل مع صاحب البوت", url=owner_url)])
         reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
 
-
         if update.message:
             await update.message.reply_text(error_msg, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
         elif update.callback_query:
             await update.callback_query.message.reply_text(error_msg, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
-
 
 
 async def my_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -721,20 +767,22 @@ async def my_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user_info = db.get_user_activation_details(user_id)
 
     role_str = "👑 مالك / أدمن" if is_admin_user else ("🟢 مشترك مفعّل" if is_act else "🔒 غير مفعّل")
-    exp_str = "دائم"
-    if user_info and user_info.get("expires_at"):
-        exp_str = user_info["expires_at"]
-    elif not is_admin_user and not is_act:
-        exp_str = "غير مشترك"
+    if is_admin_user:
+        time_left_str = "دائم ومفتوح ♾️ (مالك البوت)"
+    elif is_act:
+        time_left_str = format_remaining_time(user_info.get("expires_at") if user_info else None)
+    else:
+        time_left_str = "غير مشترك 🔒"
 
+    max_c_text = "غير محدود ♾️" if max_c >= 99 else f"{max_c} مواد"
     msg = (
         "🆔 <b>معلومات حسابك:</b>\n\n"
         f"👤 <b>الاسم:</b> {html.escape(user.full_name)}\n"
         f"🔢 <b>معرف الحساب (User ID):</b> <code>{user_id}</code> (اضغط للنسخ)\n"
         f"🏷️ <b>اسم المستخدم:</b> @{user.username if user.username else 'لا يوجد'}\n"
         f"🛡️ <b>الرتبة / الحالة:</b> {role_str}\n"
-        f"⏳ <b>صلاحية الاشتراك:</b> <code>{exp_str}</code>\n"
-        f"📚 <b>الحد الأقصى للمواد المراقبة:</b> <code>{max_c if is_act or is_admin_user else 0}</code> مواد\n"
+        f"⏳ <b>الوقت المتبقي:</b> <code>{time_left_str}</code>\n"
+        f"📚 <b>الحد الأقصى للمواد المراقبة:</b> <code>{max_c_text if is_act or is_admin_user else '0 مواد'}</code>\n"
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
 
@@ -761,14 +809,14 @@ async def activate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 # ==========================================
 
 async def admin_genkey_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """أمر الأدمن لتوليد مفتاح تفعيل جديد: /genkey [days] [max_courses]"""
+    """أمر الأدمن لتوليد مفتاح تفعيل جديد: /genkey [days] [max_courses] (الافتراضي: غير محدود وفل بالكامل)"""
     user_id = update.effective_user.id
     if not is_admin(user_id):
         await update.message.reply_text("⛔ هذا الأمر خاص بمالك البوت فقط!")
         return
 
     duration_days = 0
-    max_courses = config.MAX_COURSES_PER_USER
+    max_courses = 999  # افتراضياً غير محدود بالكامل
 
     if context.args:
         try:
@@ -780,20 +828,24 @@ async def admin_genkey_command(update: Update, context: ContextTypes.DEFAULT_TYP
             pass
 
     key_code = db.create_activation_key(duration_days=duration_days, max_courses=max_courses)
-    dur_desc = f"{duration_days} يوم" if duration_days > 0 else "دائم (طوال الفصل)"
+    dur_desc = f"{duration_days} يوم" if duration_days > 0 else "دائم وغير محدود ♾️ (طوال الفصل)"
+    courses_desc = "غير محدود ♾️ (كافة المواد)" if max_courses >= 99 else f"{max_courses} مواد"
 
     response_text = (
-        "👑 <b>تم توليد مفتاح تفعيل جديد بنجاح!</b>\n\n"
+        "👑 <b>تم توليد مفتاح تفعيل VIP جديد بنجاح!</b>\n\n"
         "📋 <b>كود التفعيل (اضغط عليه للنسخ):</b>\n"
         f"<code>{key_code}</code>\n\n"
         f"⏱️ <b>المدة:</b> <code>{dur_desc}</code>\n"
-        f"📚 <b>الحد الأقصى للمواد:</b> <code>{max_courses}</code> مواد\n"
+        f"📚 <b>عدد المواد:</b> <code>{courses_desc}</code>\n"
         "🔒 <b>الصلاحية:</b> يظل شغالاً دائماً ومحفوظاً بقاعدة البيانات حتى يقوم الطالب باستخدامه.\n\n"
         "💬 <b>رسالة جاهزة للإرسال للزبون:</b>\n"
         "➖➖➖➖➖➖➖➖➖➖\n"
-        f"أهلاً بك! تم إنشاء اشتراكك في بوت شواغر اليرموك 🎓\n\n"
+        f"أهلاً بك! تم إنشاء اشتراكك المميز في بوت شواغر اليرموك 🎓\n\n"
         f"🔑 كود التفعيل الخاص بك:\n<code>{key_code}</code>\n\n"
-        "طريقة التفعيل: افتح البوت وأرسل هذا الكود مباشرة لتفعيل حسابك! ⚡\n"
+        "✨ <b>مميزات الاشتراك:</b>\n"
+        f"♾️ <b>المدة:</b> {dur_desc}\n"
+        f"📚 <b>المواد:</b> {courses_desc}\n\n"
+        "طريقة التفعيل: افتح البوت وأرسل هذا الكود مباشرة لتفعيل حسابك فوراً! ⚡\n"
         "➖➖➖➖➖➖➖➖➖➖"
     )
     keyboard = [
@@ -825,10 +877,10 @@ async def admin_genkeys_command(update: Update, context: ContextTypes.DEFAULT_TY
     count = min(int(context.args[0]), 20)
     days = int(context.args[1]) if len(context.args) > 1 and context.args[1].isdigit() else 0
 
-    keys = db.create_bulk_activation_keys(count=count, duration_days=days)
-    dur_desc = f"{days} يوم" if days > 0 else "دائم"
+    keys = db.create_bulk_activation_keys(count=count, duration_days=days, max_courses=999)
+    dur_desc = f"{days} يوم" if days > 0 else "دائم ♾️"
 
-    text = f"👑 <b>تم توليد {len(keys)} مفاتيح جديدة ({dur_desc}):</b>\n\n"
+    text = f"👑 <b>تم توليد {len(keys)} مفاتيح VIP جديدة ({dur_desc} - مواد غير محدودة):</b>\n\n"
     for i, k in enumerate(keys, 1):
         text += f"{i}. <code>{k}</code>\n"
 
@@ -869,23 +921,23 @@ def build_admin_keys_view(page: int = 1, filter_status: str = "all") -> Tuple[st
         for idx, k in enumerate(keys, 1):
             is_used = bool(k["is_used"])
             status_icon = "🔴" if is_used else "🟢"
-            dur_text = f"{k['duration_days']} يوم" if k.get("duration_days") and k["duration_days"] > 0 else "دائم (طوال الفصل)"
+            dur_text = f"{k['duration_days']} يوم" if k.get("duration_days") and k["duration_days"] > 0 else "دائم ♾️"
             max_c = k.get("max_courses", 10)
+            max_c_text = "غير محدود ♾️" if max_c >= 99 else f"{max_c} مواد"
             created_date = str(k.get("created_at", ""))[:16]
 
             text += f"{status_icon} <b>كود:</b> <code>{k['key_code']}</code>\n"
-            text += f"   ⏱️ <b>المدة:</b> {dur_text} | 📚 <b>الحد:</b> {max_c} مواد\n"
+            text += f"   ⏱️ <b>المدة:</b> {dur_text} | 📚 <b>المواد:</b> {max_c_text}\n"
 
             if is_used:
                 u_name = f"@{k['used_by_username']}" if k.get("used_by_username") else (k.get("user_first_name") or "مستخدم")
-                used_date = str(k.get("used_at", ""))[:16]
-                exp_date = str(k.get("expires_at", "دائم"))[:16] if k.get("expires_at") else "دائم (طوال الفصل)"
+                time_left = format_remaining_time(k.get("expires_at"))
                 text += f"   👤 <b>المستخدم:</b> <b>{html.escape(u_name)}</b> (<code>{k.get('used_by_user_id')}</code>)\n"
-                text += f"   📅 <b>تاريخ التفعيل:</b> <code>{used_date}</code>\n"
-                text += f"   ⏳ <b>ينتهي في:</b> <code>{exp_date}</code>\n"
+                text += f"   ⏳ <b>الوقت المتبقي:</b> <code>{time_left}</code>\n"
             else:
-                text += "   ⏳ <b>الحالة:</b> <i>جاهز ومتاح للاستخدام (لم يُفعّل بعد)</i>\n"
-                text += f"   📅 <b>تاريخ التوليد:</b> <code>{created_date}</code>\n"
+                dur_label = f"{k['duration_days']} يوم" if k.get("duration_days") and k["duration_days"] > 0 else "دائم ♾️"
+                text += "   ⏳ <b>الحالة:</b> <i>جاهز ومتاح للاستخدام</i>\n"
+                text += f"   ⏱️ <b>مدة الاشتراك:</b> <code>{dur_label} (تبدأ عند التفعيل)</code>\n"
 
             text += "───────────────────\n"
 
@@ -965,8 +1017,8 @@ async def admin_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     for idx, u in enumerate(users[:30], 1):
         status_icon = "🟢" if u["is_active"] else "🔴"
         u_name = f"@{u['username']}" if u["username"] else (u["first_name"] or "مستخدم")
-        exp = u["expires_at"] if u["expires_at"] else "دائم"
-        text += f"{idx}. {status_icon} <b>{html.escape(u_name)}</b> (<code>{u['user_id']}</code>)\n   🔑 <code>{u['key_code']}</code> | الصلاحية: {exp}\n\n"
+        time_left = format_remaining_time(u.get("expires_at"))
+        text += f"{idx}. {status_icon} <b>{html.escape(u_name)}</b> (<code>{u['user_id']}</code>)\n   🔑 <code>{u['key_code']}</code> | ⏳ <b>المتبقي:</b> <code>{time_left}</code>\n\n"
 
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -1228,21 +1280,25 @@ async def callback_query_router(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif data == "btn_admin_genkey":
         if is_admin(user_id):
-            key_code = db.create_activation_key(duration_days=0, max_courses=config.MAX_COURSES_PER_USER)
-            await query.answer("✅ تم توليد مفتاح جديد بنجاح!")
-            dur_desc = "دائم (طوال الفصل)"
+            key_code = db.create_activation_key(duration_days=0, max_courses=999)
+            await query.answer("✅ تم توليد مفتاح VIP غير محدود بنجاح!")
+            dur_desc = "دائم وغير محدود ♾️ (طوال الفصل)"
+            courses_desc = "غير محدود ♾️ (كافة المواد)"
             resp_msg = (
-                "👑 <b>تم توليد مفتاح دائم جديد:</b>\n\n"
+                "👑 <b>تم توليد مفتاح تفعيل VIP جديد بنجاح!</b>\n\n"
                 "📋 <b>كود التفعيل (اضغط عليه للنسخ):</b>\n"
                 f"<code>{key_code}</code>\n\n"
                 f"⏱️ <b>المدة:</b> <code>{dur_desc}</code>\n"
-                f"📚 <b>الحد الأقصى للمواد:</b> <code>{config.MAX_COURSES_PER_USER}</code> مواد\n"
+                f"📚 <b>عدد المواد:</b> <code>{courses_desc}</code>\n"
                 "🔒 <b>الصلاحية:</b> يظل شغالاً دائماً ومحفوظاً بقاعدة البيانات حتى يقوم الطالب باستخدامه.\n\n"
                 "💬 <b>رسالة جاهزة للإرسال للزبون:</b>\n"
                 "➖➖➖➖➖➖➖➖➖➖\n"
-                f"أهلاً بك! تم إنشاء اشتراكك في بوت شواغر اليرموك 🎓\n\n"
+                f"أهلاً بك! تم إنشاء اشتراكك المميز في بوت شواغر اليرموك 🎓\n\n"
                 f"🔑 كود التفعيل الخاص بك:\n<code>{key_code}</code>\n\n"
-                "طريقة التفعيل: افتح البوت وأرسل هذا الكود مباشرة لتفعيل حسابك! ⚡\n"
+                "✨ <b>مميزات الاشتراك:</b>\n"
+                f"♾️ <b>المدة:</b> {dur_desc}\n"
+                f"📚 <b>المواد:</b> {courses_desc}\n\n"
+                "طريقة التفعيل: افتح البوت وأرسل هذا الكود مباشرة لتفعيل حسابك فوراً! ⚡\n"
                 "➖➖➖➖➖➖➖➖➖➖"
             )
             keyboard = [
