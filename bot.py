@@ -788,7 +788,7 @@ async def admin_genkey_command(update: Update, context: ContextTypes.DEFAULT_TYP
         f"<code>{key_code}</code>\n\n"
         f"⏱️ <b>المدة:</b> <code>{dur_desc}</code>\n"
         f"📚 <b>الحد الأقصى للمواد:</b> <code>{max_courses}</code> مواد\n"
-        "🔒 <b>الاستخدام:</b> لحساب وتيليجرام واحد فقط لمرة واحدة.\n\n"
+        "🔒 <b>الصلاحية:</b> يظل شغالاً دائماً ومحفوظاً بقاعدة البيانات حتى يقوم الطالب باستخدامه.\n\n"
         "💬 <b>رسالة جاهزة للإرسال للزبون:</b>\n"
         "➖➖➖➖➖➖➖➖➖➖\n"
         f"أهلاً بك! تم إنشاء اشتراكك في بوت شواغر اليرموك 🎓\n\n"
@@ -796,7 +796,19 @@ async def admin_genkey_command(update: Update, context: ContextTypes.DEFAULT_TYP
         "طريقة التفعيل: افتح البوت وأرسل هذا الكود مباشرة لتفعيل حسابك! ⚡\n"
         "➖➖➖➖➖➖➖➖➖➖"
     )
-    await update.message.reply_text(response_text, parse_mode=ParseMode.HTML)
+    keyboard = [
+        [InlineKeyboardButton("🗑️ حذف هذا المفتاح فوراً", callback_data=f"delkey_code_{key_code}")],
+        [
+            InlineKeyboardButton("🔑 توليد مفتاح آخر", callback_data="btn_admin_genkey"),
+            InlineKeyboardButton("📋 عرض كل المفاتيح", callback_data="keys_p_1_all")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if update.message:
+        await update.message.reply_text(response_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    elif update.callback_query:
+        await update.callback_query.message.reply_text(response_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
 
 
 async def admin_genkeys_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -820,39 +832,121 @@ async def admin_genkeys_command(update: Update, context: ContextTypes.DEFAULT_TY
     for i, k in enumerate(keys, 1):
         text += f"{i}. <code>{k}</code>\n"
 
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+    keyboard = [
+        [InlineKeyboardButton("📋 الانتقال لإدارة المفاتيح", callback_data="keys_p_1_all")]
+    ]
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+
+
+def build_admin_keys_view(page: int = 1, filter_status: str = "all") -> Tuple[str, InlineKeyboardMarkup]:
+    """بناء واجهة قائمة المفاتيح التفاعلية للأدمن مع خيارات الحذف السريع والتقليب والفلترة"""
+    db_filter = None if filter_status == "all" else filter_status
+    per_page = 4
+    keys, total_count, total_pages = db.get_all_keys_paginated(filter_status=db_filter, page=page, per_page=per_page)
+    stats = db.get_system_stats()
+
+    filter_title = "الكل 📋"
+    if filter_status == "unused":
+        filter_title = "المتاحة فقط 🟢"
+    elif filter_status == "used":
+        filter_title = "المستخدمة فقط 🔴"
+
+    text = (
+        "👑 <b>لوحة إدارة ومراقبة المفاتيح:</b>\n\n"
+        f"📊 <b>إحصائيات سريعة:</b>\n"
+        f"🟢 متاحة للبيع: <code>{stats['unused_keys']}</code> | "
+        f"🔴 مستخدمة: <code>{stats['used_keys']}</code> | "
+        f"👥 مفعّلين: <code>{stats['active_users']}</code>\n"
+        f"📄 <b>الصفحة:</b> <code>{page}</code> من <code>{total_pages}</code> (عرض: <b>{filter_title}</b>)\n"
+        "━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+
+    delete_buttons = []
+
+    if not keys:
+        text += "<i>📭 لا توجد مفاتيح في هذا القسم حالياً.</i>\n\n"
+    else:
+        for idx, k in enumerate(keys, 1):
+            is_used = bool(k["is_used"])
+            status_icon = "🔴" if is_used else "🟢"
+            dur_text = f"{k['duration_days']} يوم" if k.get("duration_days") and k["duration_days"] > 0 else "دائم (طوال الفصل)"
+            max_c = k.get("max_courses", 10)
+            created_date = str(k.get("created_at", ""))[:16]
+
+            text += f"{status_icon} <b>كود:</b> <code>{k['key_code']}</code>\n"
+            text += f"   ⏱️ <b>المدة:</b> {dur_text} | 📚 <b>الحد:</b> {max_c} مواد\n"
+
+            if is_used:
+                u_name = f"@{k['used_by_username']}" if k.get("used_by_username") else (k.get("user_first_name") or "مستخدم")
+                used_date = str(k.get("used_at", ""))[:16]
+                exp_date = str(k.get("expires_at", "دائم"))[:16] if k.get("expires_at") else "دائم (طوال الفصل)"
+                text += f"   👤 <b>المستخدم:</b> <b>{html.escape(u_name)}</b> (<code>{k.get('used_by_user_id')}</code>)\n"
+                text += f"   📅 <b>تاريخ التفعيل:</b> <code>{used_date}</code>\n"
+                text += f"   ⏳ <b>ينتهي في:</b> <code>{exp_date}</code>\n"
+            else:
+                text += "   ⏳ <b>الحالة:</b> <i>جاهز ومتاح للاستخدام (لم يُفعّل بعد)</i>\n"
+                text += f"   📅 <b>تاريخ التوليد:</b> <code>{created_date}</code>\n"
+
+            text += "───────────────────\n"
+
+            # الزر الخاص بحذف هذا المفتاح بكبسة واحدة
+            short_code = k['key_code']
+            btn_label = f"🗑️ حذف ({short_code})"
+            delete_buttons.append([InlineKeyboardButton(btn_label, callback_data=f"delkey_id_{k['id']}_{page}_{filter_status}")])
+
+    # أزرار الفلترة
+    all_label = "• الكل 📋 •" if filter_status == "all" else "الكل 📋"
+    unused_label = f"• المتاحة ({stats['unused_keys']}) 🟢 •" if filter_status == "unused" else f"المتاحة ({stats['unused_keys']}) 🟢"
+    used_label = f"• المستخدمة ({stats['used_keys']}) 🔴 •" if filter_status == "used" else f"المستخدمة ({stats['used_keys']}) 🔴"
+
+    filter_row = [
+        InlineKeyboardButton(unused_label, callback_data="keys_p_1_unused"),
+        InlineKeyboardButton(used_label, callback_data="keys_p_1_used"),
+        InlineKeyboardButton(all_label, callback_data="keys_p_1_all"),
+    ]
+
+    # أزرار التقليب
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"keys_p_{page-1}_{filter_status}"))
+    nav_row.append(InlineKeyboardButton(f"🔄 {page}/{total_pages}", callback_data=f"keys_p_{page}_{filter_status}"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton("التالي ➡️", callback_data=f"keys_p_{page+1}_{filter_status}"))
+
+    # أزرار التحكم
+    action_row = [
+        InlineKeyboardButton("🔑 توليد مفتاح جديد", callback_data="btn_admin_genkey"),
+        InlineKeyboardButton("👑 لوحة الأدمن", callback_data="btn_admin_panel"),
+    ]
+
+    keyboard = delete_buttons + [filter_row]
+    if nav_row:
+        keyboard.append(nav_row)
+    keyboard.append(action_row)
+
+    return text, InlineKeyboardMarkup(keyboard)
 
 
 async def admin_keys_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """عرض قائمة المفاتيح المتاحة والمستخدمة"""
+    """عرض قائمة المفاتيح التفاعلية للأدمن"""
     user_id = update.effective_user.id
     if not is_admin(user_id):
         await update.message.reply_text("⛔ هذا الأمر خاص بمالك البوت فقط!")
         return
 
-    filter_type = context.args[0].lower() if context.args else None
-    keys = db.get_all_keys(filter_status=filter_type, limit=20)
-    stats = db.get_system_stats()
+    filter_type = context.args[0].lower() if context.args else "all"
+    if filter_type not in ["unused", "used", "all"]:
+        filter_type = "all"
 
-    text = (
-        "🔑 <b>لوحة إدارة المفاتيح:</b>\n\n"
-        f"🟢 المفاتيح المتاحة للبيع: <code>{stats['unused_keys']}</code>\n"
-        f"🔴 المفاتيح المباعة/المستخدمة: <code>{stats['used_keys']}</code>\n"
-        f"👥 إجمالي المستخدمين المفعّلين: <code>{stats['active_users']}</code>\n\n"
-        "<b>آخر المفاتيح:</b>\n"
-    )
-
-    if not keys:
-        text += "<i>لا توجد مفاتيح حالياً. استخدم /genkey لتوليد مفتاح.</i>"
-    else:
-        for k in keys:
-            status_icon = "🔴 مستخدم" if k["is_used"] else "🟢 متاح"
-            user_info = f" (من @{k['used_by_username'] or k['used_by_user_id']})" if k["is_used"] else ""
-            dur_info = f"{k['duration_days']} يوم" if k["duration_days"] > 0 else "دائم"
-            text += f"• <code>{k['key_code']}</code> | {status_icon} | {dur_info}{user_info}\n"
-
-    text += "\n💡 <i>استخدم <code>/genkey</code> لتوليد مفتاح جديد، أو <code>/revoke [ID]</code> لإلغاء تفعيل حساب.</i>"
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+    text, reply_markup = build_admin_keys_view(page=1, filter_status=filter_type)
+    if update.callback_query:
+        await update.callback_query.answer()
+        try:
+            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        except Exception:
+            await update.callback_query.message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    elif update.message:
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
 
 
 async def admin_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1136,21 +1230,86 @@ async def callback_query_router(update: Update, context: ContextTypes.DEFAULT_TY
         if is_admin(user_id):
             key_code = db.create_activation_key(duration_days=0, max_courses=config.MAX_COURSES_PER_USER)
             await query.answer("✅ تم توليد مفتاح جديد بنجاح!")
+            dur_desc = "دائم (طوال الفصل)"
             resp_msg = (
                 "👑 <b>تم توليد مفتاح دائم جديد:</b>\n\n"
+                "📋 <b>كود التفعيل (اضغط عليه للنسخ):</b>\n"
                 f"<code>{key_code}</code>\n\n"
-                "<i>(اضغط عليه للنسخ وإرساله للمشتري)</i>"
+                f"⏱️ <b>المدة:</b> <code>{dur_desc}</code>\n"
+                f"📚 <b>الحد الأقصى للمواد:</b> <code>{config.MAX_COURSES_PER_USER}</code> مواد\n"
+                "🔒 <b>الصلاحية:</b> يظل شغالاً دائماً ومحفوظاً بقاعدة البيانات حتى يقوم الطالب باستخدامه.\n\n"
+                "💬 <b>رسالة جاهزة للإرسال للزبون:</b>\n"
+                "➖➖➖➖➖➖➖➖➖➖\n"
+                f"أهلاً بك! تم إنشاء اشتراكك في بوت شواغر اليرموك 🎓\n\n"
+                f"🔑 كود التفعيل الخاص بك:\n<code>{key_code}</code>\n\n"
+                "طريقة التفعيل: افتح البوت وأرسل هذا الكود مباشرة لتفعيل حسابك! ⚡\n"
+                "➖➖➖➖➖➖➖➖➖➖"
             )
-            await query.message.reply_text(resp_msg, parse_mode=ParseMode.HTML)
-            await admin_stats_command(update, context)
+            keyboard = [
+                [InlineKeyboardButton("🗑️ حذف هذا المفتاح فوراً", callback_data=f"delkey_code_{key_code}")],
+                [
+                    InlineKeyboardButton("🔑 توليد مفتاح آخر", callback_data="btn_admin_genkey"),
+                    InlineKeyboardButton("📋 عرض كل المفاتيح", callback_data="keys_p_1_all")
+                ]
+            ]
+            await query.message.reply_text(resp_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
         else:
             await query.answer("⛔ هذا القسم خاص بالمالك فقط!", show_alert=True)
 
-    elif data == "btn_admin_keys":
+    elif data == "btn_admin_keys" or data.startswith("keys_p_"):
         if is_admin(user_id):
-            await admin_keys_command(update, context)
+            await query.answer()
+            if data == "btn_admin_keys":
+                page, filter_status = 1, "all"
+            else:
+                parts = data.split("_")
+                page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
+                filter_status = parts[3] if len(parts) > 3 else "all"
+            text, reply_markup = build_admin_keys_view(page=page, filter_status=filter_status)
+            try:
+                await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+            except Exception:
+                await query.message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
         else:
             await query.answer("⛔ هذا القسم خاص بالمالك فقط!", show_alert=True)
+
+    elif data.startswith("delkey_id_"):
+        if not is_admin(user_id):
+            await query.answer("⛔ خاص بمالك البوت فقط!", show_alert=True)
+            return
+        parts = data.split("_")
+        key_id = int(parts[2])
+        page = int(parts[3])
+        filter_status = parts[4]
+
+        key_obj = db.get_key_by_id(key_id)
+        key_code_str = key_obj.get("key_code", "") if key_obj else str(key_id)
+        success = db.delete_key_by_id(key_id)
+        if success:
+            await query.answer(f"🗑️ تم حذف المفتاح {key_code_str} بنجاح!", show_alert=True)
+        else:
+            await query.answer("⚠️ لم يتم العثور على المفتاح!", show_alert=True)
+
+        text, reply_markup = build_admin_keys_view(page=page, filter_status=filter_status)
+        try:
+            await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+
+    elif data.startswith("delkey_code_"):
+        if not is_admin(user_id):
+            await query.answer("⛔ خاص بمالك البوت فقط!", show_alert=True)
+            return
+        key_code_target = data.replace("delkey_code_", "").strip()
+        success = db.delete_key(key_code_target)
+        if success:
+            await query.answer(f"🗑️ تم حذف المفتاح {key_code_target} بنجاح!", show_alert=True)
+            try:
+                await query.edit_message_text(f"🗑️ <b>تم حذف المفتاح بنجاح:</b>\n<code>{key_code_target}</code>", parse_mode=ParseMode.HTML)
+            except Exception:
+                pass
+        else:
+            await query.answer("⚠️ المفتاح محذوف بالفعل أو غير موجود!", show_alert=True)
 
     elif data == "btn_admin_users":
         if is_admin(user_id):

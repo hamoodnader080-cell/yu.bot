@@ -147,11 +147,6 @@ def init_db() -> None:
                 );
             """)
 
-            try:
-                cursor.execute("UPDATE activated_users SET is_active = 1, expires_at = NULL WHERE is_active = 0;")
-            except Exception:
-                pass
-
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS bot_settings (
                     setting_key TEXT PRIMARY KEY,
@@ -215,11 +210,6 @@ def init_db() -> None:
                     expires_at TIMESTAMP DEFAULT NULL
                 );
             """)
-
-            try:
-                cursor.execute("UPDATE activated_users SET is_active = 1, expires_at = NULL WHERE is_active = 0;")
-            except Exception:
-                pass
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS bot_settings (
@@ -535,19 +525,132 @@ def get_user_activation_details(user_id: int) -> Optional[Dict[str, Any]]:
 
 def get_all_keys(filter_status: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
     """
-    جلب المفاتيح مع إمكانية الفلترة:
+    جلب المفاتيح مع بيانات المستخدم المرتبط (إن وُجد) مع إمكانية الفلترة:
     filter_status: 'unused', 'used', or None (all)
     """
+    where_clause = ""
+    if filter_status == "unused":
+        where_clause = "WHERE k.is_used = 0"
+    elif filter_status == "used":
+        where_clause = "WHERE k.is_used = 1"
+
+    sql = f"""
+        SELECT 
+            k.id, k.key_code, k.duration_days, k.max_courses, 
+            k.is_used, k.used_by_user_id, k.used_by_username, 
+            k.used_at, k.expires_at, k.created_at,
+            u.first_name as user_first_name,
+            u.is_active as user_is_active
+        FROM activation_keys k
+        LEFT JOIN activated_users u ON k.used_by_user_id = u.user_id
+        {where_clause}
+        ORDER BY k.id DESC
+        LIMIT ?
+    """
     with get_db_cursor() as (cursor, is_pg):
-        if filter_status == "unused":
-            sql = "SELECT * FROM activation_keys WHERE is_used = 0 ORDER BY id DESC LIMIT ?"
-        elif filter_status == "used":
-            sql = "SELECT * FROM activation_keys WHERE is_used = 1 ORDER BY id DESC LIMIT ?"
-        else:
-            sql = "SELECT * FROM activation_keys ORDER BY id DESC LIMIT ?"
         cursor.execute(_format_sql(sql, is_pg), (limit,))
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
+
+
+def get_all_keys_paginated(
+    filter_status: Optional[str] = None,
+    page: int = 1,
+    per_page: int = 5
+) -> Tuple[List[Dict[str, Any]], int, int]:
+    """
+    جلب المفاتيح بنظام الصفحات (Pagination) للأدمن:
+    يرجع: (قائمة المفاتيح, إجمالي العدد, إجمالي الصفحات)
+    """
+    page = max(1, page)
+    offset = (page - 1) * per_page
+
+    where_clause = ""
+    if filter_status == "unused":
+        where_clause = "WHERE k.is_used = 0"
+    elif filter_status == "used":
+        where_clause = "WHERE k.is_used = 1"
+
+    count_sql = f"SELECT COUNT(*) FROM activation_keys k {where_clause}"
+
+    data_sql = f"""
+        SELECT 
+            k.id, k.key_code, k.duration_days, k.max_courses, 
+            k.is_used, k.used_by_user_id, k.used_by_username, 
+            k.used_at, k.expires_at, k.created_at,
+            u.first_name as user_first_name,
+            u.is_active as user_is_active
+        FROM activation_keys k
+        LEFT JOIN activated_users u ON k.used_by_user_id = u.user_id
+        {where_clause}
+        ORDER BY k.id DESC
+        LIMIT ? OFFSET ?
+    """
+
+    with get_db_cursor() as (cursor, is_pg):
+        cursor.execute(_format_sql(count_sql, is_pg))
+        total_count = int(_get_scalar(cursor.fetchone()) or 0)
+
+        total_pages = max(1, (total_count + per_page - 1) // per_page)
+        if page > total_pages:
+            page = total_pages
+            offset = (page - 1) * per_page
+
+        cursor.execute(_format_sql(data_sql, is_pg), (per_page, offset))
+        rows = cursor.fetchall()
+        keys = [dict(r) for r in rows]
+
+        return keys, total_count, total_pages
+
+
+def get_key_by_id(key_id: int) -> Optional[Dict[str, Any]]:
+    """جلب تفاصيل مفتاح عبر رقمه التعريفي ID"""
+    sql = """
+        SELECT 
+            k.*, 
+            u.first_name as user_first_name,
+            u.is_active as user_is_active
+        FROM activation_keys k
+        LEFT JOIN activated_users u ON k.used_by_user_id = u.user_id
+        WHERE k.id = ?
+    """
+    with get_db_cursor() as (cursor, is_pg):
+        cursor.execute(_format_sql(sql, is_pg), (key_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def get_key_by_code(key_code: str) -> Optional[Dict[str, Any]]:
+    """جلب تفاصيل مفتاح عبر كود المفتاح"""
+    sql = """
+        SELECT 
+            k.*, 
+            u.first_name as user_first_name,
+            u.is_active as user_is_active
+        FROM activation_keys k
+        LEFT JOIN activated_users u ON k.used_by_user_id = u.user_id
+        WHERE UPPER(k.key_code) = ?
+    """
+    with get_db_cursor() as (cursor, is_pg):
+        cursor.execute(_format_sql(sql, is_pg), (key_code.strip().upper(),))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def delete_key_by_id(key_id: int) -> bool:
+    """حذف مفتاح من النظام عبر الـ ID"""
+    sql = "DELETE FROM activation_keys WHERE id = ?"
+    with get_db_cursor() as (cursor, is_pg):
+        cursor.execute(_format_sql(sql, is_pg), (key_id,))
+        return cursor.rowcount > 0
+
+
+def delete_key(key_code: str) -> bool:
+    """حذف مفتاح من النظام عبر الكود"""
+    sql = "DELETE FROM activation_keys WHERE UPPER(key_code) = ?"
+    with get_db_cursor() as (cursor, is_pg):
+        cursor.execute(_format_sql(sql, is_pg), (key_code.strip().upper(),))
+        return cursor.rowcount > 0
 
 
 def get_all_activated_users() -> List[Dict[str, Any]]:
@@ -568,14 +671,6 @@ def revoke_user_activation(user_id: int) -> bool:
         rc = cursor.rowcount
         cursor.execute(_format_sql(sql2, is_pg), (user_id,))
         return rc > 0
-
-
-def delete_key(key_code: str) -> bool:
-    """حذف مفتاح من النظام"""
-    sql = "DELETE FROM activation_keys WHERE UPPER(key_code) = ?"
-    with get_db_cursor() as (cursor, is_pg):
-        cursor.execute(_format_sql(sql, is_pg), (key_code.strip().upper(),))
-        return cursor.rowcount > 0
 
 
 def get_system_stats() -> Dict[str, Any]:
