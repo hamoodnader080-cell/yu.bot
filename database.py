@@ -129,6 +129,14 @@ def init_db() -> None:
                     expires_at TIMESTAMP DEFAULT NULL
                 );
             """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS bot_settings (
+                    setting_key TEXT PRIMARY KEY,
+                    setting_val TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
             logger.info("✅ PostgreSQL Database Initialized Successfully!")
         else:
             # جداول SQLite المحلية
@@ -183,6 +191,14 @@ def init_db() -> None:
                     max_courses INTEGER DEFAULT 10,
                     activated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     expires_at TIMESTAMP DEFAULT NULL
+                );
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS bot_settings (
+                    setting_key TEXT PRIMARY KEY,
+                    setting_val TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
             logger.info("✅ SQLite Database Initialized Successfully!")
@@ -570,3 +586,25 @@ def get_system_stats() -> Dict[str, Any]:
             "total_keys": unused_keys_count + used_keys_count,
             "active_courses": active_courses_count
         }
+
+
+def get_setting(key: str, default: str = "") -> str:
+    """جلب قيمة إعداد معين من قاعدة البيانات"""
+    sql = "SELECT setting_val FROM bot_settings WHERE setting_key = ?"
+    with get_db_cursor() as (cursor, is_pg):
+        cursor.execute(_format_sql(sql, is_pg), (key,))
+        row = cursor.fetchone()
+        val = _get_scalar(row)
+        return str(val) if val is not None else default
+
+
+def set_setting(key: str, value: str) -> None:
+    """تعيين أو تحديث قيمة إعداد في قاعدة البيانات"""
+    sql = """
+        INSERT INTO bot_settings (setting_key, setting_val, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(setting_key)
+        DO UPDATE SET setting_val = excluded.setting_val, updated_at = CURRENT_TIMESTAMP
+    """
+    with get_db_cursor() as (cursor, is_pg):
+        cursor.execute(_format_sql(sql, is_pg), (key, value))

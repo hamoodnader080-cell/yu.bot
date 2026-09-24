@@ -53,6 +53,7 @@ if 7566322988 not in ADMIN_IDS:
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "mhmdnader5").strip().lstrip("@")
 ADMIN_PHONE = os.getenv("ADMIN_PHONE", "962778356084").strip().lstrip("+").replace(" ", "")
 REQUIRE_ACTIVATION = os.getenv("REQUIRE_ACTIVATION", "True").lower() in ("true", "1", "yes", "y")
+LOG_CHANNEL_ID = os.getenv("LOG_CHANNEL_ID", "").strip()
 
 
 

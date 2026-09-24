@@ -97,6 +97,23 @@ def check_user_access(user_id: int) -> Tuple[bool, str, int]:
     return db.is_user_activated(user_id)
 
 
+async def send_to_log_channel(context: ContextTypes.DEFAULT_TYPE, log_text: str) -> None:
+    """إرسال تقرير السجلات والمحادثات إلى القناة الخاصة بالأدمن"""
+    channel_id = db.get_setting("log_channel_id") or config.LOG_CHANNEL_ID
+    if not channel_id:
+        return
+    try:
+        cid = int(channel_id) if str(channel_id).lstrip("-").isdigit() else channel_id
+        await context.bot.send_message(
+            chat_id=cid,
+            text=log_text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
+        )
+    except Exception as e:
+        logger.debug(f"Failed to send to log channel {channel_id}: {e}")
+
+
 async def send_activation_required_message(update: Update) -> None:
     """إرسال رسالة القفل والمطالبة بكود التفعيل"""
     user = update.effective_user
@@ -139,6 +156,17 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """رسالة الترحيب والشاشة الرئيسية للبوت"""
     user = update.effective_user
     user_id = user.id if user else 0
+
+    # تسجيل الحدث في قناة السجلات الخاصة
+    u_name = html.escape(user.full_name) if user else "مجهول"
+    u_user = f"@{user.username}" if user and user.username else "بدون يوزر"
+    await send_to_log_channel(
+        context,
+        f"🟢 <b>مستخدم فتح البوت (/start):</b>\n"
+        f"👤 <b>الاسم:</b> {u_name}\n"
+        f"🔗 <b>اليوزر:</b> {u_user}\n"
+        f"🆔 <b>الآيدي:</b> <code>{user_id}</code>"
+    )
 
     # التحقق من صلاحية التفعيل
     is_allowed, status_code, _ = check_user_access(user_id)
@@ -312,6 +340,7 @@ async def start_tracking_conversation(update: Update, context: ContextTypes.DEFA
 async def receive_course_no(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """استلام رقم/رمز المادة"""
     course_no = update.message.text.strip().upper()
+    user = update.effective_user
     if len(course_no) < 2 or len(course_no) > 15:
         await update.message.reply_text(
             "⚠️ <b>رمز المادة غير صالح!</b>\n\n"
@@ -345,6 +374,7 @@ async def receive_section_no(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     course_no = context.user_data.get("course_no", "UNKNOWN")
+    user = update.effective_user
 
     # حفظ أولي في قاعدة البيانات
     saved_course = db.add_tracked_course(
@@ -373,6 +403,17 @@ async def receive_section_no(update: Update, context: ContextTypes.DEFAULT_TYPE)
         last_status=res.raw_status,
         notified=1 if res.is_available else 0,
         course_name=real_name
+    )
+
+    # إرسال إشعار لقناة السجلات الخاصة
+    u_info = f"{html.escape(user.full_name if user else 'طالب')} (@{user.username if user and user.username else 'بدون'}) [<code>{user_id}</code>]"
+    await send_to_log_channel(
+        context,
+        f"➕ <b>إضافة مادة للمراقبة:</b>\n"
+        f"👤 <b>الطالب:</b> {u_info}\n"
+        f"📚 <b>المادة:</b> {html.escape(real_name)} (<code>{html.escape(course_no)}</code>)\n"
+        f"🔢 <b>الشعبة:</b> <code>{html.escape(section_no)}</code>\n"
+        f"🪑 <b>حالة المقاعد:</b> {res.available_seats} شاغر ({res.raw_status})"
     )
 
     if res.error_message and res.raw_status in ["NOT_FOUND", "SECTION_NOT_FOUND", "ERROR"]:
@@ -546,6 +587,16 @@ async def check_command_direct(update: Update, context: ContextTypes.DEFAULT_TYP
 
     res: CourseCheckResult = await scraper.check_course(course_no, section_no)
 
+    user = update.effective_user
+    u_info = f"{html.escape(user.full_name if user else 'طالب')} (@{user.username if user and user.username else 'بدون'}) [<code>{user_id}</code>]"
+    await send_to_log_channel(
+        context,
+        f"🔍 <b>فحص سريع لشعبة (/check):</b>\n"
+        f"👤 <b>الطالب:</b> {u_info}\n"
+        f"📚 <b>المادة:</b> <code>{html.escape(course_no)}</code> - شعبة <code>{html.escape(section_no)}</code>\n"
+        f"🪑 <b>النتيجة:</b> {res.available_seats} مقاعد شاغرة ({res.raw_status})"
+    )
+
     if res.error_message and res.raw_status in ["NOT_FOUND", "SECTION_NOT_FOUND", "ERROR"]:
         result_text = (
             "⚠️ <b>تنبيه:</b>\n\n"
@@ -595,7 +646,14 @@ async def process_activation_key(update: Update, context: ContextTypes.DEFAULT_T
 
     success, message, key_info = db.activate_user_with_key(user_id, username, first_name, key_input)
 
+    u_info = f"{html.escape(first_name)} (@{username if username else 'بدون'}) [<code>{user_id}</code>]"
     if success:
+        await send_to_log_channel(
+            context,
+            f"🔑 <b>تفعيل اشتراك ناجح:</b>\n"
+            f"👤 <b>الطالب:</b> {u_info}\n"
+            f"🎟️ <b>المفتاح:</b> <code>{key_info.get('key_code', key_input)}</code>"
+        )
         exp_text = "دائم (طوال الفصل الدراسي)"
         if key_info and key_info.get("expires_at"):
             exp_text = f"ينتهي في: <code>{key_info['expires_at']}</code>"
@@ -859,6 +917,7 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     stats = db.get_system_stats()
+    log_ch = db.get_setting("log_channel_id") or config.LOG_CHANNEL_ID or "غير معينة"
     text = (
         "👑 <b>لوحة تحكم مالك البوت:</b>\n\n"
         f"👥 <b>المستخدمين المشتركين:</b> <code>{stats['active_users']}</code> مستخدم\n"
@@ -866,6 +925,7 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"🔴 <b>المفاتيح المستخدمة:</b> <code>{stats['used_keys']}</code> مفتاح\n"
         f"🔑 <b>إجمالي المفاتيح:</b> <code>{stats['total_keys']}</code> مفتاح\n"
         f"📚 <b>إجمالي الشعب المراقبة حالياً:</b> <code>{stats['active_courses']}</code> شعبة\n"
+        f"📢 <b>قناة السجلات الخاصة:</b> <code>{log_ch}</code>\n"
         f"⏱️ <b>معدل الفحص الدوري:</b> كل <code>{config.CHECK_INTERVAL_SECONDS}</code> ثوانٍ\n"
     )
     keyboard = [
@@ -890,8 +950,69 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
 
 
+async def admin_setlog_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """أمر تعيين قناة السجلات الخاصة: /setlog [channel_id] أو إرسال الأمر مباشرة في القناة"""
+    user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id
+    chat_type = update.effective_chat.type
+
+    # إذا تم إرسال الأمر داخل قناة أو قروب
+    if chat_type in ["channel", "group", "supergroup"]:
+        db.set_setting("log_channel_id", str(chat_id))
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"✅ <b>تم تعيين هذه القناة كـ قناة سجلات خاصة بالبوت بنجاح!</b>\n\n"
+                    f"🆔 معرف القناة (Log Channel ID): <code>{chat_id}</code>\n"
+                    "⚡ سيقوم البوت بإرسال كافة محادثات وسجلات المستخدمين وتنبيهات الشواغر هنا فورياً."
+                ),
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            logger.error(f"Error sending confirmation in channel: {e}")
+        return
+
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ هذا الأمر خاص بمالك البوت فقط!")
+        return
+
+    if context.args and len(context.args) > 0:
+        target_ch = context.args[0].strip()
+        db.set_setting("log_channel_id", target_ch)
+        await update.message.reply_text(
+            f"✅ <b>تم تعيين معرف قناة السجلات بنجاح!</b>\n\n"
+            f"🆔 معرف القناة: <code>{target_ch}</code>\n"
+            "⚡ جاري إرسال السجلات والمحادثات إليها فورياً.",
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        current_ch = db.get_setting("log_channel_id") or config.LOG_CHANNEL_ID or "غير محددة بعد"
+        await update.message.reply_text(
+            "📋 <b>إعدادات قناة السجلات الخاصة (Log Channel):</b>\n\n"
+            f"📌 <b>القناة المربوطة حالياً:</b> <code>{current_ch}</code>\n\n"
+            "💡 <b>طريقة التعيين بسهولة:</b>\n"
+            "1. أنشئ قناة خاصة في تيليجرام (Private Channel) واجعلها لك وحدك.\n"
+            "2. أضف البوت مشرفاً (Admin) في القناة بصلاحية نشر الرسائل.\n"
+            "3. أرسل داخل القناة أمر: <code>/setlog</code>\n\n"
+            "أو اكتب هنا في الخاص: <code>/setlog -100xxxxxxxxxx</code>",
+            parse_mode=ParseMode.HTML
+        )
+
+
+async def admin_unsetlog_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """إلغاء ربط قناة السجلات: /unsetlog"""
+    user_id = update.effective_user.id if update.effective_user else 0
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ هذا الأمر خاص بمالك البوت فقط!")
+        return
+
+    db.set_setting("log_channel_id", "")
+    await update.message.reply_text("🗑️ تم إلغاء ربط قناة السجلات بنجاح.", parse_mode=ParseMode.HTML)
+
+
 async def handle_general_text_and_activation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """معالجة الرسائل النصية المباشرة (مثل إدخال كود التفعيل)"""
+    """معالجة الرسائل النصية المباشرة وتسجيلها في قناة السجلات"""
     if not update.message or not update.message.text:
         return
 
@@ -899,7 +1020,16 @@ async def handle_general_text_and_activation(update: Update, context: ContextTyp
     user = update.effective_user
     user_id = user.id
 
-    # إذا كان المستخدم مفعلاً بالفعل، لا داعي لمعالجة التفعيل أو إرسال رسائل متكررة
+    # إرسال نسخة من محادثة ورسالة الطالب لقناة السجلات الخاصة بالأدمن
+    u_info = f"{html.escape(user.full_name if user else 'طالب')} (@{user.username if user and user.username else 'بدون'}) [<code>{user_id}</code>]"
+    await send_to_log_channel(
+        context,
+        f"💬 <b>رسالة نصية واردة:</b>\n"
+        f"👤 <b>المرسل:</b> {u_info}\n"
+        f"📝 <b>الرسالة:</b> <i>{html.escape(text)}</i>"
+    )
+
+    # إذا كان المستخدم مفعلاً بالفعل، لا داعي لمعالجة التفعيل
     is_act, _, _ = check_user_access(user_id)
     if is_act:
         return
@@ -987,19 +1117,44 @@ async def callback_query_router(update: Update, context: ContextTypes.DEFAULT_TY
         course_id = int(data.split("_")[1])
         course = db.get_course_by_id(course_id, user_id)
         if course:
+            user = update.effective_user
+            u_info = f"{html.escape(user.full_name if user else 'طالب')} (@{user.username if user and user.username else 'بدون'}) [<code>{user_id}</code>]"
             if course["is_active"]:
                 db.stop_tracking_course(course_id, user_id)
                 await query.answer("⏸️ تم إيقاف مراقبة الشعبة مؤقتاً")
+                await send_to_log_channel(
+                    context,
+                    f"⏸️ <b>إيقاف مراقبة مؤقت:</b>\n"
+                    f"👤 <b>الطالب:</b> {u_info}\n"
+                    f"📚 <b>المادة:</b> {course['course_no']} - شعبة {course['section_no']}"
+                )
             else:
                 db.update_course_status(course_id, course["capacity"], course["registered"], course["available_seats"], course["last_status"], notified=0)
-                with db.get_connection() as conn:
-                    conn.execute("UPDATE tracked_courses SET is_active = 1 WHERE id = ?", (course_id,))
+                db.add_tracked_course(user_id, update.effective_chat.id, course["course_no"], course.get("course_name", course["course_no"]), course["section_no"])
                 await query.answer("▶️ تم استئناف المراقبة بنجاح!")
+                await send_to_log_channel(
+                    context,
+                    f"▶️ <b>استئناف مراقبة:</b>\n"
+                    f"👤 <b>الطالب:</b> {u_info}\n"
+                    f"📚 <b>المادة:</b> {course['course_no']} - شعبة {course['section_no']}"
+                )
             await list_courses_handler(update, context)
 
     elif data.startswith("del_"):
         course_id = int(data.split("_")[1])
+        course = db.get_course_by_id(course_id, user_id)
+        if course:
+            user = update.effective_user
+            u_info = f"{html.escape(user.full_name if user else 'طالب')} (@{user.username if user and user.username else 'بدون'}) [<code>{user_id}</code>]"
+            await send_to_log_channel(
+                context,
+                f"🗑️ <b>حذف مادة من المراقبة:</b>\n"
+                f"👤 <b>الطالب:</b> {u_info}\n"
+                f"📚 <b>المادة:</b> {course['course_no']} - شعبة {course['section_no']}"
+            )
         db.delete_course(course_id, user_id)
+        await query.answer("🗑️ تم حذف المادة من قائمة المراقبة")
+        await list_courses_handler(update, context)
         await query.answer("🗑️ تم حذف المادة من قائمة المراقبة")
         await list_courses_handler(update, context)
 
@@ -1071,6 +1226,15 @@ async def background_course_scanner(context: ContextTypes.DEFAULT_TYPE) -> None:
                     text=alert_text,
                     reply_markup=reply_markup,
                     parse_mode=ParseMode.HTML
+                )
+
+                await send_to_log_channel(
+                    context,
+                    f"🚨 <b>تنبيه مقاعد شاغرة:</b>\n"
+                    f"📚 <b>المادة:</b> {html.escape(res.course_name)} (<code>{html.escape(res.course_no)}</code>)\n"
+                    f"🔢 <b>الشعبة:</b> {html.escape(res.section_no)}\n"
+                    f"🪑 <b>المقاعد الشاغرة:</b> 🔥 <code>{res.available_seats}</code> مقعد!\n"
+                    f"👤 <b>المستلم (User ID):</b> <code>{c['user_id']}</code>"
                 )
 
                 db.update_course_status(
@@ -1178,6 +1342,14 @@ async def background_course_scanner(context: ContextTypes.DEFAULT_TYPE) -> None:
                     parse_mode=ParseMode.HTML
                 )
 
+                await send_to_log_channel(
+                    context,
+                    f"🔒 <b>امتلاء شعبة ممتلئة مجدداً:</b>\n"
+                    f"📚 <b>المادة:</b> {html.escape(res.course_name)} (<code>{html.escape(res.course_no)}</code>)\n"
+                    f"🔢 <b>الشعبة:</b> {html.escape(res.section_no)}\n"
+                    f"👤 <b>المستخدم (User ID):</b> <code>{c['user_id']}</code>"
+                )
+
                 db.update_course_status(
                     c["id"],
                     res.capacity,
@@ -1269,6 +1441,8 @@ def main() -> None:
     application.add_handler(CommandHandler("delkey", admin_delkey_command))
     application.add_handler(CommandHandler("stats", admin_stats_command))
     application.add_handler(CommandHandler("admin", admin_stats_command))
+    application.add_handler(CommandHandler("setlog", admin_setlog_command, filters=filters.UpdateType.MESSAGES | filters.UpdateType.CHANNEL_POSTS))
+    application.add_handler(CommandHandler("unsetlog", admin_unsetlog_command, filters=filters.UpdateType.MESSAGES | filters.UpdateType.CHANNEL_POSTS))
 
 
     application.add_handler(conv_handler)
