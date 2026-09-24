@@ -979,23 +979,48 @@ async def admin_setlog_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if context.args and len(context.args) > 0:
         target_ch = context.args[0].strip()
+        if target_ch.lower() == "me":
+            target_ch = str(user_id)
         db.set_setting("log_channel_id", target_ch)
         await update.message.reply_text(
-            f"✅ <b>تم تعيين معرف قناة السجلات بنجاح!</b>\n\n"
-            f"🆔 معرف القناة: <code>{target_ch}</code>\n"
-            "⚡ جاري إرسال السجلات والمحادثات إليها فورياً.",
+            f"✅ <b>تم تعيين وجهة السجلات بنجاح!</b>\n\n"
+            f"🆔 المعرف: <code>{target_ch}</code>\n"
+            "⚡ سيقوم البوت بإرسال كافة محادثات الطلاب والأنشطة والتنبيهات فورياً إلى هذه الوجهة.",
             parse_mode=ParseMode.HTML
         )
     else:
         current_ch = db.get_setting("log_channel_id") or config.LOG_CHANNEL_ID or "غير محددة بعد"
+        
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "📢 إضافة البوت لقناتك كمشرف (بضغطة واحدة)",
+                    url="https://t.me/yu_c0urses_bot?startchannel=botadmin&admin=post_messages+edit_messages+delete_messages"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "👥 إضافة البوت لقروبك كمشرف (بضغطة واحدة)",
+                    url="https://t.me/yu_c0urses_bot?startgroup=botadmin&admin=post_messages+edit_messages+delete_messages"
+                )
+            ],
+            [
+                InlineKeyboardButton("📥 استلام السجلات هنا في الخاص مباشرة", callback_data="btn_setlog_me")
+            ],
+            [
+                InlineKeyboardButton("🗑️ إلغاء ربط السجلات", callback_data="btn_unsetlog")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
         await update.message.reply_text(
-            "📋 <b>إعدادات قناة السجلات الخاصة (Log Channel):</b>\n\n"
-            f"📌 <b>القناة المربوطة حالياً:</b> <code>{current_ch}</code>\n\n"
-            "💡 <b>طريقة التعيين بسهولة:</b>\n"
-            "1. أنشئ قناة خاصة في تيليجرام (Private Channel) واجعلها لك وحدك.\n"
-            "2. أضف البوت مشرفاً (Admin) في القناة بصلاحية نشر الرسائل.\n"
-            "3. أرسل داخل القناة أمر: <code>/setlog</code>\n\n"
-            "أو اكتب هنا في الخاص: <code>/setlog -100xxxxxxxxxx</code>",
+            "📋 <b>لوحة إعداد قناة/مجموعة السجلات (Log Channel):</b>\n\n"
+            f"📌 <b>الجهة المربوطة حالياً:</b> <code>{current_ch}</code>\n\n"
+            "⚡ <b>اختر الطريقة الأنسب لك لاستلام سجلات ومحادثات الطلاب:</b>\n"
+            "1️⃣ <b>زر القناة أعلاه:</b> سيقوم بإضافة البوت لقناتك فوراً مع كافة الصلاحيات بدون أخطاء.\n"
+            "2️⃣ <b>زر القروب أعلاه:</b> لإنشاء قروب خاص بك والبوت بضغطة زر.\n"
+            "3️⃣ <b>في الخاص مباشرة:</b> إذا أردت أن تصلك محادثات وسجلات الطلاب هنا في المحادثة الخاصة مع البوت مباشرة!",
+            reply_markup=reply_markup,
             parse_mode=ParseMode.HTML
         )
 
@@ -1096,6 +1121,27 @@ async def callback_query_router(update: Update, context: ContextTypes.DEFAULT_TY
             await admin_users_command(update, context)
         else:
             await query.answer("⛔ هذا القسم خاص بالمالك فقط!", show_alert=True)
+
+    elif data == "btn_setlog_me":
+        if is_admin(user_id):
+            db.set_setting("log_channel_id", str(user_id))
+            await query.answer("✅ تم التعيين بنجاح!")
+            await query.message.reply_text(
+                f"✅ <b>تم تفعيل استلام السجلات في محادثتك الخاصة مباشرة!</b>\n\n"
+                f"🆔 المعرف (Your ID): <code>{user_id}</code>\n"
+                "⚡ ستصلك الآن كافة محادثات وسجلات الطلاب وتنبيهات الشواغر هنا في الخاص.",
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            await query.answer("⛔ خاص بمالك البوت فقط!", show_alert=True)
+
+    elif data == "btn_unsetlog":
+        if is_admin(user_id):
+            db.set_setting("log_channel_id", "")
+            await query.answer("🗑️ تم إلغاء الربط!")
+            await query.message.reply_text("🗑️ تم إلغاء ربط قناة/وجهة السجلات بنجاح.", parse_mode=ParseMode.HTML)
+        else:
+            await query.answer("⛔ خاص بمالك البوت فقط!", show_alert=True)
 
     elif data == "btn_quick_check":
         await query.answer()
