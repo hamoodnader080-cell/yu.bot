@@ -91,9 +91,18 @@ scraper = YarmoukScraper()
 # إدارة الصلاحيات ومفاتيح التفعيل (Security)
 # ==========================================
 
+def is_owner(user_id: int) -> bool:
+    """التحقق مما إذا كان المستخدم هو المالك الأساسي للبوت (Owner)"""
+    return user_id == config.OWNER_ID or (bool(config.ADMIN_IDS) and user_id == config.ADMIN_IDS[0])
+
+
 def is_admin(user_id: int) -> bool:
-    """التحقق مما إذا كان المستخدم هو مالك/أدمن البوت"""
-    return user_id in config.ADMIN_IDS
+    """التحقق مما إذا كان المستخدم مالكاً أو مشرفاً معتمداً (Admin)"""
+    if is_owner(user_id):
+        return True
+    if user_id in config.ADMIN_IDS:
+        return True
+    return user_id in db.get_sub_admins()
 
 
 def check_user_access(user_id: int) -> Tuple[bool, str, int]:
@@ -231,7 +240,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     name = html.escape(user.first_name) if user and user.first_name else "طالبنا العزيز"
-    role_badge = " 👑 (المالك)" if is_admin(user_id) else ""
+    if is_owner(user_id):
+        role_badge = " 👑 (المالك)"
+    elif is_admin(user_id):
+        role_badge = " 🛡️ (مشرف)"
+    else:
+        role_badge = ""
     
     welcome_text = (
         f"👋 أهلاً بك يا <b>{name}</b>{role_badge} في <b>بوت مراقبة شواغر جامعة اليرموك</b> 🎓\n\n"
@@ -280,15 +294,26 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     admin_help = ""
-    if is_admin(user_id):
+    if is_owner(user_id):
         admin_help = (
-            "\n\n👑 <b>أوامر الأدمن (المالك):</b>\n"
-            "🔹 <code>/genkey [أيام] [أقصى_مواد]</code> - توليد مفتاح تفعيل جديد (مثال: <code>/genkey</code> أو <code>/genkey 30</code>)\n"
-            "🔹 <code>/genkeys [العدد] [أيام]</code> - توليد عدة مفاتيح دفعة واحدة\n"
-            "🔹 <code>/keys</code> - عرض كافة المفاتيح المتاحة والمستخدمة\n"
+            "\n\n👑 <b>أوامر مالك البوت (Owner):</b>\n"
+            "🔹 <code>/addadmin [User_ID]</code> - إضافة حساب كـ مشرف (Admin)\n"
+            "🔹 <code>/deladmin [User_ID]</code> - إزالة مشرف من البوت\n"
+            "🔹 <code>/admins</code> - عرض قائمة المشرفين\n"
+            "🔹 <code>/genkey</code> - توليد مفتاح VIP جديد\n"
+            "🔹 <code>/keys</code> - عرض وحذف المفاتيح\n"
             "🔹 <code>/users</code> - عرض المشتركين المفعّلين\n"
-            "🔹 <code>/stats</code> - إحصائيات عامة عن المشتركين والشعب\n"
-            "🔹 <code>/revoke [User_ID]</code> - إلغاء تفعيل مستخدم\n"
+            "🔹 <code>/stats</code> - لوحة التحكم الشاملة\n"
+            "🔹 <code>/setlog</code> - إعداد قناة السجلات\n"
+        )
+    elif is_admin(user_id):
+        admin_help = (
+            "\n\n🛡️ <b>أوامر المشرف (Admin):</b>\n"
+            "🔹 <code>/genkey</code> - توليد مفتاح تفعيل جديد\n"
+            "🔹 <code>/keys</code> - عرض المفاتيح وإدارتها\n"
+            "🔹 <code>/users</code> - عرض المشتركين المفعّلين\n"
+            "🔹 <code>/stats</code> - لوحة الإحصائيات\n"
+            "🔹 <code>/admins</code> - عرض قائمة المشرفين\n"
         )
 
     help_text = (
@@ -321,8 +346,10 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     all_active = db.get_all_active_courses()
     user_info = db.get_user_activation_details(user_id)
     
-    if is_admin(user_id):
+    if is_owner(user_id):
         sub_status = "👑 مالك البوت (دائم ♾️)"
+    elif is_admin(user_id):
+        sub_status = "🛡️ مشرف البوت (دائم ♾️)"
     elif is_allowed:
         sub_status = format_remaining_time(user_info.get("expires_at") if user_info else None)
     else:
@@ -762,16 +789,22 @@ async def my_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """عرض معرف المستخدم وحالة حسابه"""
     user = update.effective_user
     user_id = user.id
+    is_owner_user = is_owner(user_id)
     is_admin_user = is_admin(user_id)
     is_act, status_code, max_c = db.is_user_activated(user_id)
     user_info = db.get_user_activation_details(user_id)
 
-    role_str = "👑 مالك / أدمن" if is_admin_user else ("🟢 مشترك مفعّل" if is_act else "🔒 غير مفعّل")
-    if is_admin_user:
+    if is_owner_user:
+        role_str = "👑 مالك البوت (Owner)"
         time_left_str = "دائم ومفتوح ♾️ (مالك البوت)"
+    elif is_admin_user:
+        role_str = "🛡️ مشرف البوت (Admin)"
+        time_left_str = "دائم ومفتوح ♾️ (مشرف البوت)"
     elif is_act:
+        role_str = "🟢 مشترك مفعّل (VIP)"
         time_left_str = format_remaining_time(user_info.get("expires_at") if user_info else None)
     else:
+        role_str = "🔒 غير مفعّل"
         time_left_str = "غير مشترك 🔒"
 
     max_c_text = "غير محدود ♾️" if max_c >= 99 else f"{max_c} مواد"
@@ -1067,25 +1100,235 @@ async def admin_delkey_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 
-async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """عرض إحصائيات النظام الشاملة للأدمن"""
+async def get_user_display_info(bot, user_id: int) -> Tuple[str, str]:
+    """جلب الاسم الحقيقي واليوزر للمستخدم من تيليجرام أو قاعدة البيانات"""
+    name = ""
+    username = ""
+
+    # 1. فحص قاعدة البيانات إذا كان المستخدم مسجلاً
+    user_info = db.get_user_activation_details(user_id)
+    if user_info:
+        name = user_info.get("first_name", "")
+        username = user_info.get("username", "")
+
+    # 2. محاولة جلبه من تيليجرام API مباشرة
+    try:
+        chat = await bot.get_chat(user_id)
+        if chat:
+            tg_name = chat.full_name or chat.first_name
+            if tg_name:
+                name = tg_name
+            if chat.username:
+                username = chat.username
+    except Exception:
+        pass
+
+    if not name:
+        name = f"مستخدم {user_id}"
+
+    return name, username
+
+
+def build_admin_admins_view(caller_user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
+    """بناء واجهة عرض وإدارة المشرفين (Admins) مع الأسماء واليوزرات"""
+    admins_data = db.get_sub_admins_detailed()
+    owner_id = config.OWNER_ID
+
+    text = (
+        "🛡️ <b>لوحة مسؤولي ومشرفي البوت (Admins):</b>\n\n"
+        f"👑 <b>المالك الأساسي (Owner):</b>\n"
+        f"• <code>{owner_id}</code> (صلاحيات كاملة ⚡)\n\n"
+    )
+
+    if admins_data:
+        text += f"🛡️ <b>المشرفين المعتمدين ({len(admins_data)}):</b>\n"
+        for idx, adm in enumerate(admins_data, 1):
+            adm_id = adm.get("user_id", "")
+            adm_name = adm.get("name") or f"مشرف {adm_id}"
+            user_part = f" (@{adm['username']})" if adm.get("username") else ""
+            text += f"{idx}. 👤 <b>{html.escape(adm_name)}</b>{user_part}\n   🆔 <code>{adm_id}</code>\n\n"
+        text += (
+            "✨ <b>صلاحيات المشرف:</b>\n"
+            "• الدخول للوحة التحكم (<code>/admin</code> أو <code>/stats</code>)\n"
+            "• توليد مفاتيح التفعيل وحذفها (<code>/genkey</code> و <code>/keys</code>)\n"
+            "• فحص قائمة المشتركين (<code>/users</code>)\n"
+            "• إلغاء تفعيل اشتراك مستخدم (<code>/revoke</code>)\n"
+            "• استخدام كافة مميزات البوت مجاناً.\n"
+        )
+    else:
+        text += (
+            "📭 <i>لا يوجد أي مشرفين إضافيين حالياً (المالك فقط).</i>\n\n"
+            "➕ <b>لإضافة حساب كـ مشرف (Admin):</b>\n"
+            "أرسل الأمر مع الآيدي بالشكل التالي:\n"
+            "<code>/addadmin 123456789</code>\n\n"
+            "💡 <i>المشرف يستطيع توليد المفاتيح والتحكم بالمشتركين دون الوصول لإعدادات القناة أو إدارة المشرفين.</i>\n"
+        )
+
+    keyboard = []
+    if is_owner(caller_user_id):
+        for adm in admins_data:
+            adm_id = adm.get("user_id")
+            adm_name = adm.get("name") or str(adm_id)
+            keyboard.append([
+                InlineKeyboardButton(f"🗑️ إزالة المشرف: {adm_name}", callback_data=f"deladmin_id_{adm_id}")
+            ])
+        keyboard.append([
+            InlineKeyboardButton("➕ إضافة مشرف جديد (/addadmin)", callback_data="btn_addadmin_info")
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton("🔙 لوحة التحكم", callback_data="btn_admin_panel"),
+        InlineKeyboardButton("🏠 الرئيسية", callback_data="btn_main_menu")
+    ])
+
+    return text, InlineKeyboardMarkup(keyboard)
+
+
+async def admin_admins_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """عرض قائمة المشرفين والمالك: /admins"""
     user_id = update.effective_user.id
     if not is_admin(user_id):
-        await update.message.reply_text("⛔ هذا الأمر خاص بمالك البوت فقط!")
+        await update.message.reply_text("⛔ هذا القسم خاص بالمشرفين ومالك البوت فقط!")
+        return
+
+    # تحديث تلقائي لأسماء المشرفين إن لم تكن مسجلة
+    for adm in db.get_sub_admins_detailed():
+        if not adm.get("username") or adm.get("name", "").startswith("مشرف "):
+            name, username = await get_user_display_info(context.bot, adm["user_id"])
+            if name != f"مستخدم {adm['user_id']}":
+                db.add_sub_admin(adm["user_id"], name=name, username=username)
+
+    text, reply_markup = build_admin_admins_view(user_id)
+    if update.callback_query:
+        await update.callback_query.answer()
+        try:
+            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        except Exception:
+            await update.callback_query.message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    elif update.message:
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+
+
+async def admin_addadmin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """إضافة مشرف جديد (خاص بالمالك): /addadmin <user_id>"""
+    user_id = update.effective_user.id
+    if not is_owner(user_id):
+        await update.message.reply_text("⛔ هذا الأمر خاص بمالك البوت الأساسي (Owner) فقط!")
+        return
+
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text(
+            "⚠️ <b>طريقة إضافة مشرف:</b>\n"
+            "اكتب الأمر مع الآيدي الخاص بالشخص:\n"
+            "<code>/addadmin 123456789</code>\n\n"
+            "💡 <i>(يمكن للشخص معرفة الآيدي الخاص به عن طريق إرسال /myid للبوت).</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    target_id = int(context.args[0])
+    if target_id == config.OWNER_ID:
+        await update.message.reply_text("👑 هذا الحساب هو مالك البوت الأساسي بالفعل!", parse_mode=ParseMode.HTML)
+        return
+
+    # جلب الاسم واليوزر من تيليجرام
+    name, username = await get_user_display_info(context.bot, target_id)
+    db.add_sub_admin(target_id, name=name, username=username)
+    
+    await send_to_log_channel(
+        context,
+        f"🛡️ <b>تعيين مشرف جديد (Admin):</b>\n"
+        f"👤 <b>الاسم:</b> {html.escape(name)}\n"
+        f"🔗 <b>اليوزر:</b> @{username if username else 'بدون'}\n"
+        f"🆔 <b>الآيدي:</b> <code>{target_id}</code>\n"
+        f"👑 <b>بواسطة المالك:</b> <code>{user_id}</code>"
+    )
+
+    user_tag = f"<b>{html.escape(name)}</b>" + (f" (@{html.escape(username)})" if username else "")
+
+    keyboard = [
+        [InlineKeyboardButton(f"🗑️ إزالة المشرف ({name}) فوراً", callback_data=f"deladmin_id_{target_id}")],
+        [
+            InlineKeyboardButton("🛡️ عرض قائمة المشرفين", callback_data="btn_admin_manage_admins"),
+            InlineKeyboardButton("👑 لوحة تحكم الأدمن", callback_data="btn_admin_panel")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        f"✅ <b>تم تعيين {user_tag} كـ مشرف (Admin) في البوت بنجاح! 🛡️</b>\n\n"
+        f"🔢 <b>معرف الحساب:</b> <code>{target_id}</code>\n\n"
+        "✨ <b>الصلاحيات الممنوحة له:</b>\n"
+        "• الدخول إلى لوحة التحكم (<code>/admin</code>)\n"
+        "• توليد مفاتيح تفعيل جديدة (<code>/genkey</code>)\n"
+        "• عرض وحذف المفاتيح (<code>/keys</code>)\n"
+        "• عرض قائمة المشتركين (<code>/users</code>)\n"
+        "• استخدام البوت بكافة ميزاته مجاناً.\n\n"
+        "🔒 <i>(لا يستطيع تغيير إعدادات السجلات أو إضافة مشرفين آخرين).</i>",
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def admin_deladmin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """إزالة مشرف (خاص بالمالك): /deladmin <user_id>"""
+    user_id = update.effective_user.id
+    if not is_owner(user_id):
+        await update.message.reply_text("⛔ هذا الأمر خاص بمالك البوت الأساسي (Owner) فقط!")
+        return
+
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text(
+            "⚠️ <b>طريقة إزالة مشرف:</b>\n"
+            "اكتب الأمر مع الآيدي الخاص بالمشرف:\n"
+            "<code>/deladmin 123456789</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    target_id = int(context.args[0])
+    success = db.remove_sub_admin(target_id)
+    if success:
+        await send_to_log_channel(
+            context,
+            f"🗑️ <b>إزالة مشرف (Admin):</b>\n"
+            f"👤 <b>الآيدي:</b> <code>{target_id}</code>\n"
+            f"👑 <b>بواسطة المالك:</b> <code>{user_id}</code>"
+        )
+        await update.message.reply_text(f"🗑️ تم إزالة المشرف <code>{target_id}</code> من النظام بنجاح!", parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text(f"⚠️ لم يتم العثور على مشرف بالآيدي <code>{target_id}</code> في قائمة المشرفين.", parse_mode=ParseMode.HTML)
+
+
+async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """عرض إحصائيات النظام الشاملة للأدمن والمالك"""
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ هذا الأمر خاص بمسؤولي البوت فقط!")
         return
 
     stats = db.get_system_stats()
     log_ch = db.get_setting("log_channel_id") or config.LOG_CHANNEL_ID or "غير معينة"
+    sub_admins_count = len(db.get_sub_admins())
+
+    is_owner_user = is_owner(user_id)
+    panel_title = "👑 <b>لوحة تحكم مالك البوت (Owner):</b>" if is_owner_user else "🛡️ <b>لوحة تحكم مشرف البوت (Admin):</b>"
+
     text = (
-        "👑 <b>لوحة تحكم مالك البوت:</b>\n\n"
+        f"{panel_title}\n\n"
         f"👥 <b>المستخدمين المشتركين:</b> <code>{stats['active_users']}</code> مستخدم\n"
         f"🟢 <b>المفاتيح المتاحة للبيع:</b> <code>{stats['unused_keys']}</code> مفتاح\n"
         f"🔴 <b>المفاتيح المستخدمة:</b> <code>{stats['used_keys']}</code> مفتاح\n"
         f"🔑 <b>إجمالي المفاتيح:</b> <code>{stats['total_keys']}</code> مفتاح\n"
         f"📚 <b>إجمالي الشعب المراقبة حالياً:</b> <code>{stats['active_courses']}</code> شعبة\n"
-        f"📢 <b>قناة السجلات الخاصة:</b> <code>{log_ch}</code>\n"
-        f"⏱️ <b>معدل الفحص الدوري:</b> كل <code>{config.CHECK_INTERVAL_SECONDS}</code> ثوانٍ\n"
     )
+    if is_owner_user:
+        text += (
+            f"🛡️ <b>عدد المشرفين (Admins):</b> <code>{sub_admins_count}</code> مشرف\n"
+            f"📢 <b>قناة السجلات الخاصة:</b> <code>{log_ch}</code>\n"
+        )
+    text += f"⏱️ <b>معدل الفحص الدوري:</b> كل <code>{config.CHECK_INTERVAL_SECONDS}</code> ثوانٍ\n"
+
     keyboard = [
         [
             InlineKeyboardButton("🔑 توليد مفتاح جديد", callback_data="btn_admin_genkey"),
@@ -1093,9 +1336,20 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         ],
         [
             InlineKeyboardButton("👥 قائمة المشتركين", callback_data="btn_admin_users"),
-            InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")
+            InlineKeyboardButton("🛡️ المشرفين (Admins)", callback_data="btn_admin_manage_admins")
         ]
     ]
+
+    if is_owner_user:
+        keyboard.append([
+            InlineKeyboardButton("📢 إعداد قناة السجلات", callback_data="btn_setlog_menu"),
+            InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")
+        ])
+    else:
+        keyboard.append([
+            InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")
+        ])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     if update.callback_query:
@@ -1131,8 +1385,8 @@ async def admin_setlog_command(update: Update, context: ContextTypes.DEFAULT_TYP
             logger.error(f"Error sending confirmation in channel: {e}")
         return
 
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ هذا الأمر خاص بمالك البوت فقط!")
+    if not is_owner(user_id):
+        await update.message.reply_text("⛔ هذا الأمر خاص بمالك البوت الأساسي (Owner) فقط!")
         return
 
     if context.args and len(context.args) > 0:
@@ -1167,6 +1421,9 @@ async def admin_setlog_command(update: Update, context: ContextTypes.DEFAULT_TYP
             ],
             [
                 InlineKeyboardButton("🗑️ إلغاء ربط السجلات", callback_data="btn_unsetlog")
+            ],
+            [
+                InlineKeyboardButton("🔙 لوحة التحكم", callback_data="btn_admin_panel")
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1186,8 +1443,8 @@ async def admin_setlog_command(update: Update, context: ContextTypes.DEFAULT_TYP
 async def admin_unsetlog_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """إلغاء ربط قناة السجلات: /unsetlog"""
     user_id = update.effective_user.id if update.effective_user else 0
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ هذا الأمر خاص بمالك البوت فقط!")
+    if not is_owner(user_id):
+        await update.message.reply_text("⛔ هذا الأمر خاص بمالك البوت الأساسي (Owner) فقط!")
         return
 
     db.set_setting("log_channel_id", "")
@@ -1371,10 +1628,118 @@ async def callback_query_router(update: Update, context: ContextTypes.DEFAULT_TY
         if is_admin(user_id):
             await admin_users_command(update, context)
         else:
+            await query.answer("⛔ هذا القسم خاص بمسؤولي البوت فقط!", show_alert=True)
+
+    elif data == "btn_admin_manage_admins":
+        if is_admin(user_id):
+            await admin_admins_command(update, context)
+        else:
             await query.answer("⛔ هذا القسم خاص بالمالك فقط!", show_alert=True)
 
+    elif data.startswith("deladmin_id_"):
+        if not is_owner(user_id):
+            await query.answer("⛔ هذا الإجراء خاص بمالك البوت الأساسي فقط!", show_alert=True)
+            return
+        target_adm_id = int(data.replace("deladmin_id_", "").strip())
+        
+        # جلب الاسم قبل الحذف لعرضه للمالك
+        admins_data = db.get_sub_admins_detailed()
+        target_obj = next((x for x in admins_data if int(x.get("user_id", 0)) == target_adm_id), None)
+        target_name = target_obj.get("name", str(target_adm_id)) if target_obj else str(target_adm_id)
+        
+        success = db.remove_sub_admin(target_adm_id)
+        if success:
+            await query.answer(f"🗑️ تم إزالة المشرف {target_name} بنجاح!", show_alert=True)
+            await send_to_log_channel(
+                context,
+                f"🗑️ <b>إزالة مشرف (Admin):</b>\n👤 <b>الاسم:</b> {html.escape(target_name)}\n🔢 <b>الآيدي:</b> <code>{target_adm_id}</code>\n👑 <b>بواسطة المالك:</b> <code>{user_id}</code>"
+            )
+            
+            # إذا كان الضغط من داخل رسالة التعيين المباشرة
+            if query.message and "تم تعيين" in query.message.text:
+                del_text = (
+                    f"🗑️ <b>تمت إزالة المشرف {html.escape(target_name)} (<code>{target_adm_id}</code>) من قائمة المشرفين بنجاح!</b>\n\n"
+                    "⚡ يمكنك إعادة تعيينه مشرفاً في أي وقت بضغطة زر واحدة أدناه:"
+                )
+                readd_kb = [
+                    [InlineKeyboardButton(f"➕ إعادة تعيين {target_name} كمشرف", callback_data=f"readdadmin_id_{target_adm_id}")],
+                    [InlineKeyboardButton("🛡️ عرض قائمة المشرفين", callback_data="btn_admin_manage_admins")],
+                    [InlineKeyboardButton("👑 لوحة تحكم الأدمن", callback_data="btn_admin_panel")]
+                ]
+                try:
+                    await query.edit_message_text(del_text, reply_markup=InlineKeyboardMarkup(readd_kb), parse_mode=ParseMode.HTML)
+                    return
+                except Exception:
+                    pass
+        else:
+            await query.answer("⚠️ المشرف غير موجود أو تمت إزالته بالفعل!", show_alert=True)
+
+        text, reply_markup = build_admin_admins_view(user_id)
+        try:
+            await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+
+    elif data.startswith("readdadmin_id_"):
+        if not is_owner(user_id):
+            await query.answer("⛔ خاص بمالك البوت الأساسي فقط!", show_alert=True)
+            return
+        target_adm_id = int(data.replace("readdadmin_id_", "").strip())
+        name, username = await get_user_display_info(context.bot, target_adm_id)
+        db.add_sub_admin(target_adm_id, name=name, username=username)
+        await query.answer(f"✅ تم إعادة تعيين {name} كمشرف بنجاح!", show_alert=True)
+
+        user_tag = f"<b>{html.escape(name)}</b>" + (f" (@{html.escape(username)})" if username else "")
+        resp_text = (
+            f"✅ <b>تم تعيين {user_tag} كـ مشرف (Admin) في البوت بنجاح! 🛡️</b>\n\n"
+            f"🔢 <b>معرف الحساب:</b> <code>{target_adm_id}</code>\n\n"
+            "✨ <b>الصلاحيات الممنوحة له:</b>\n"
+            "• الدخول إلى لوحة التحكم (<code>/admin</code>)\n"
+            "• توليد مفاتيح تفعيل جديدة (<code>/genkey</code>)\n"
+            "• عرض وحذف المفاتيح (<code>/keys</code>)\n"
+            "• عرض قائمة المشتركين (<code>/users</code>)\n"
+            "• استخدام البوت بكافة ميزاته مجاناً.\n\n"
+            "🔒 <i>(لا يستطيع تغيير إعدادات السجلات أو إضافة مشرفين آخرين).</i>"
+        )
+        keyboard = [
+            [InlineKeyboardButton(f"🗑️ إزالة المشرف ({name}) فوراً", callback_data=f"deladmin_id_{target_adm_id}")],
+            [
+                InlineKeyboardButton("🛡️ عرض قائمة المشرفين", callback_data="btn_admin_manage_admins"),
+                InlineKeyboardButton("👑 لوحة تحكم الأدمن", callback_data="btn_admin_panel")
+            ]
+        ]
+        try:
+            await query.edit_message_text(resp_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+
+    elif data == "btn_addadmin_info":
+        if not is_owner(user_id):
+            await query.answer("⛔ خاص بمالك البوت فقط!", show_alert=True)
+            return
+        await query.answer()
+        info_text = (
+            "➕ <b>طريقة إضافة حساب كـ مشرف (Admin):</b>\n\n"
+            "1️⃣ اطلب من الحساب فتح البوت وإرسال أمر /myid لمعرفة الآيدي الخاص به.\n"
+            "2️⃣ أرسل الأمر التالي في المحادثة:\n"
+            "<code>/addadmin [User_ID]</code>\n\n"
+            "💡 <b>مثال:</b> <code>/addadmin 7566322988</code>\n\n"
+            "⚡ فور إضافته، سيتمكن الحساب من فتح لوحة التحكم وتوليد المفاتيح ورؤية المشتركين فوراً!"
+        )
+        keyboard = [
+            [InlineKeyboardButton("🛡️ عرض المشرفين", callback_data="btn_admin_manage_admins")],
+            [InlineKeyboardButton("👑 لوحة التحكم", callback_data="btn_admin_panel")]
+        ]
+        await query.message.reply_text(info_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+
+    elif data == "btn_setlog_menu":
+        if not is_owner(user_id):
+            await query.answer("⛔ خاص بمالك البوت فقط!", show_alert=True)
+            return
+        await admin_setlog_command(update, context)
+
     elif data == "btn_setlog_me":
-        if is_admin(user_id):
+        if is_owner(user_id):
             db.set_setting("log_channel_id", str(user_id))
             await query.answer("✅ تم التعيين بنجاح!")
             await query.message.reply_text(
@@ -1384,15 +1749,15 @@ async def callback_query_router(update: Update, context: ContextTypes.DEFAULT_TY
                 parse_mode=ParseMode.HTML
             )
         else:
-            await query.answer("⛔ خاص بمالك البوت فقط!", show_alert=True)
+            await query.answer("⛔ خاص بمالك البوت الأساسي فقط!", show_alert=True)
 
     elif data == "btn_unsetlog":
-        if is_admin(user_id):
+        if is_owner(user_id):
             db.set_setting("log_channel_id", "")
             await query.answer("🗑️ تم إلغاء الربط!")
             await query.message.reply_text("🗑️ تم إلغاء ربط قناة/وجهة السجلات بنجاح.", parse_mode=ParseMode.HTML)
         else:
-            await query.answer("⛔ خاص بمالك البوت فقط!", show_alert=True)
+            await query.answer("⛔ خاص بمالك البوت الأساسي فقط!", show_alert=True)
 
     elif data == "btn_quick_check":
         await query.answer()
@@ -1729,7 +2094,7 @@ def main() -> None:
     application.add_handler(CommandHandler("myid", my_id_command))
     application.add_handler(CommandHandler("activate", activate_command))
     
-    # أوامر الأدمن
+    # أوامر الأدمن والمشرفين
     application.add_handler(CommandHandler("genkey", admin_genkey_command))
     application.add_handler(CommandHandler("genkeys", admin_genkeys_command))
     application.add_handler(CommandHandler("keys", admin_keys_command))
@@ -1738,6 +2103,9 @@ def main() -> None:
     application.add_handler(CommandHandler("delkey", admin_delkey_command))
     application.add_handler(CommandHandler("stats", admin_stats_command))
     application.add_handler(CommandHandler("admin", admin_stats_command))
+    application.add_handler(CommandHandler("admins", admin_admins_command))
+    application.add_handler(CommandHandler("addadmin", admin_addadmin_command))
+    application.add_handler(CommandHandler("deladmin", admin_deladmin_command))
     application.add_handler(CommandHandler("setlog", admin_setlog_command, filters=filters.UpdateType.MESSAGES | filters.UpdateType.CHANNEL_POSTS))
     application.add_handler(CommandHandler("unsetlog", admin_unsetlog_command, filters=filters.UpdateType.MESSAGES | filters.UpdateType.CHANNEL_POSTS))
 

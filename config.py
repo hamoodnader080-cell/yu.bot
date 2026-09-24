@@ -44,11 +44,14 @@ MAX_COURSES_PER_USER = int(os.getenv("MAX_COURSES_PER_USER", "10"))
 YU_PORTAL_URL = os.getenv("YU_PORTAL_URL", "https://sis.yu.edu.jo")
 
 
-# إعدادات الأدمن ومفاتيح التفعيل (Activation Keys)
+# إعدادات المالك (Owner) والأدمن (Admin) ومفاتيح التفعيل
+OWNER_ID_RAW = os.getenv("OWNER_ID", "7566322988").strip()
+OWNER_ID = int(OWNER_ID_RAW) if OWNER_ID_RAW.isdigit() else 7566322988
+
 ADMIN_ID_RAW = os.getenv("ADMIN_ID", "7566322988").strip()
 ADMIN_IDS = [int(x.strip()) for x in ADMIN_ID_RAW.split(",") if x.strip().isdigit()]
-if 7566322988 not in ADMIN_IDS:
-    ADMIN_IDS.append(7566322988)
+if OWNER_ID not in ADMIN_IDS:
+    ADMIN_IDS.append(OWNER_ID)
 
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "mhmdnader5").strip().lstrip("@")
 ADMIN_PHONE = os.getenv("ADMIN_PHONE", "962778356084").strip().lstrip("+").replace(" ", "")

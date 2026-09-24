@@ -2,6 +2,7 @@ import sqlite3
 import secrets
 import string
 import re
+import json
 import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any, Tuple
@@ -717,3 +718,71 @@ def set_setting(key: str, value: str) -> None:
     """
     with get_db_cursor() as (cursor, is_pg):
         cursor.execute(_format_sql(sql, is_pg), (key, value))
+
+
+def get_sub_admins_detailed() -> List[Dict[str, Any]]:
+    """جلب قائمة الأدمنز الإضافيين مع تفاصيل أسمائهم ويوزراتهم"""
+    raw = get_setting("sub_admins_data", "")
+    if raw:
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
+    # في حال وجود بيانات قديمة في sub_admins
+    simple_ids = get_sub_admins()
+    return [{"user_id": uid, "name": f"مشرف {uid}", "username": ""} for uid in simple_ids]
+
+
+def get_sub_admins() -> List[int]:
+    """جلب قائمة معرفات الأدمنز الإضافيين من قاعدة البيانات"""
+    raw_data = get_setting("sub_admins_data", "")
+    if raw_data:
+        try:
+            data = json.loads(raw_data)
+            return [int(item["user_id"]) for item in data if "user_id" in item]
+        except Exception:
+            pass
+    raw = get_setting("sub_admins", "")
+    if not raw:
+        return []
+    return [int(x.strip()) for x in raw.split(",") if x.strip().isdigit()]
+
+
+def add_sub_admin(user_id: int, name: str = "", username: str = "") -> bool:
+    """إضافة أدمن جديد للنظام مع حفظ اسمه ويوزره"""
+    admins_data = get_sub_admins_detailed()
+    existing = next((item for item in admins_data if int(item.get("user_id", 0)) == user_id), None)
+    if existing:
+        if name:
+            existing["name"] = name
+        if username:
+            existing["username"] = username
+    else:
+        admins_data.append({
+            "user_id": user_id,
+            "name": name or f"مشرف {user_id}",
+            "username": username or "",
+            "added_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        })
+    set_setting("sub_admins_data", json.dumps(admins_data, ensure_ascii=False))
+    uids = [str(item["user_id"]) for item in admins_data]
+    set_setting("sub_admins", ",".join(uids))
+    return True
+
+
+def remove_sub_admin(user_id: int) -> bool:
+    """إزالة أدمن من النظام"""
+    admins_data = get_sub_admins_detailed()
+    new_data = [item for item in admins_data if int(item.get("user_id", 0)) != user_id]
+    if len(new_data) == len(admins_data):
+        # محاولة فحص sub_admins العادية
+        simple_ids = get_sub_admins()
+        if user_id in simple_ids:
+            simple_ids = [x for x in simple_ids if x != user_id]
+            set_setting("sub_admins", ",".join(str(x) for x in simple_ids))
+            return True
+        return False
+    set_setting("sub_admins_data", json.dumps(new_data, ensure_ascii=False))
+    uids = [str(item["user_id"]) for item in new_data]
+    set_setting("sub_admins", ",".join(uids))
+    return True
