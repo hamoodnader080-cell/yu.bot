@@ -58,7 +58,12 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write("OK - بوت مراقبة شواغر اليرموك يعمل بنجاح 24/7!".encode("utf-8"))
+        self.wfile.write("OK - YU Bot Running 24/7".encode("utf-8"))
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
 
     def log_message(self, format, *args):
         pass
@@ -1461,6 +1466,9 @@ async def background_course_scanner(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def main() -> None:
     """تهيئة وتشغيل البوت"""
+    # تشغيل خادم الفحص الصحي فوراً لدعم منصات السحابة (Render / Koyeb) في ثريد منفصل
+    threading.Thread(target=start_health_server, daemon=True).start()
+
     # تهيئة قاعدة البيانات
     db.init_db()
 
@@ -1472,9 +1480,6 @@ def main() -> None:
 
     # بناء تطبيق التيليجرام مع تفعيل الـ JobQueue
     application = Application.builder().token(config.BOT_TOKEN).build()
-
-    # تشغيل خادم الفحص الصحي لدعم منصات السحابة (Render / Koyeb) في ثريد منفصل
-    threading.Thread(target=start_health_server, daemon=True).start()
 
     # محادثة إضافة مادة للمراقبة (خطوتان فقط: رقم المادة -> رقم الشعبة)
     conv_handler = ConversationHandler(
