@@ -194,10 +194,7 @@ def init_db() -> None:
                 );
             """)
 
-            try:
-                cursor.execute("ALTER TABLE tracked_courses ADD COLUMN last_alert_msg_id BIGINT DEFAULT NULL;")
-            except Exception:
-                pass
+            cursor.execute("ALTER TABLE tracked_courses ADD COLUMN IF NOT EXISTS last_alert_msg_id BIGINT DEFAULT NULL;")
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS activation_keys (
@@ -214,10 +211,7 @@ def init_db() -> None:
                 );
             """)
 
-            try:
-                cursor.execute("ALTER TABLE activation_keys ADD COLUMN used_by_first_name TEXT DEFAULT NULL;")
-            except Exception:
-                pass
+            cursor.execute("ALTER TABLE activation_keys ADD COLUMN IF NOT EXISTS used_by_first_name TEXT DEFAULT NULL;")
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS activated_users (
