@@ -18,25 +18,25 @@ except ImportError:
                     os.environ.setdefault(k.strip(), v.strip())
 
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8806949560:AAFRb33VN6nKSalRnyE2maqgkCAwqq1WO60").strip()
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "3"))
 DEMO_MODE = os.getenv("DEMO_MODE", "False").lower() in ("true", "1", "yes", "y")
 
-STUDENT_ID = os.getenv("STUDENT_ID", "").strip()
-STUDENT_PASSWORD = os.getenv("STUDENT_PASSWORD", "").strip()
+STUDENT_ID = os.getenv("STUDENT_ID", "2024827015").strip()
+STUDENT_PASSWORD = os.getenv("STUDENT_PASSWORD", "m1234123").strip()
 SIS_SESSION_ID = os.getenv("SIS_SESSION_ID", "111648752755341").strip()
 SIS_SESSION_COOKIE = os.getenv("SIS_SESSION_COOKIE", "").strip()
 YU_TERM_ID = os.getenv("YU_TERM_ID", "8593").strip()
 
 # إعدادات البريد الإلكتروني لقراءة رمز التحقق OTP
-EMAIL_USER = os.getenv("EMAIL_USER", "").strip()
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "").strip()
-EMAIL_HOST = os.getenv("EMAIL_HOST", "").strip()
+EMAIL_USER = os.getenv("EMAIL_USER", "majoodnader05@gmail.com").strip()
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "jktgfzmxwdknlyfn").strip()
+EMAIL_HOST = os.getenv("EMAIL_HOST", "imap.gmail.com").strip()
 EMAIL_PORT = int(os.getenv("EMAIL_PORT", "993"))
 
 
 DATABASE_PATH = os.getenv("DATABASE_PATH", str(BASE_DIR / "yu_tracker.db"))
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://yu_db_user:ePTcrUR2FzZYBfYAbbmy9OQNOesEieQT@dpg-daqjgfff3r2c73bj3e9g-a/yu_db").strip()
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
