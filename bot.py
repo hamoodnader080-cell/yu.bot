@@ -168,6 +168,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"🆔 <b>الآيدي:</b> <code>{user_id}</code>"
     )
 
+    # فحص إذا كان الرابط يحتوي على كود تفعيل تلقائي (/start YU-XXXX-XXXX-XXXX)
+    if context.args and len(context.args) > 0:
+        param = context.args[0].strip()
+        if "YU-" in param.upper() or len(param) >= 10:
+            await process_activation_key(update, context, user, param)
+            return
+
     # التحقق من صلاحية التفعيل
     is_allowed, status_code, _ = check_user_access(user_id)
     if not is_allowed:

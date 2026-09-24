@@ -1,6 +1,7 @@
 import sqlite3
 import secrets
 import string
+import re
 import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any, Tuple
@@ -427,11 +428,15 @@ def activate_user_with_key(
 ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
     """
     تفعيل مستخدم باستخدام مفتاح:
+    - يستخرج الكود بذكاء عبر Regex حتى لو تم لصق رسالة كاملة
     - يتحقق من وجود المفتاح
     - يتأكد أنه غير مستخدم من حساب آخر
-    - يربط المفتاح بحساب هذا المستخدم فقط
+    - يربط المفتاح بحساب هذا المستخدم بشكل دائم
     """
-    key_code = raw_key.strip().upper()
+    cleaned_input = raw_key.strip().upper()
+    match = re.search(r'YU-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}', cleaned_input, re.IGNORECASE)
+    key_code = match.group(0).upper() if match else cleaned_input
+    
     username_clean = username or ""
     first_name_clean = first_name or ""
 
