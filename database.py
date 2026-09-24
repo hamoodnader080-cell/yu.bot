@@ -81,11 +81,17 @@ def _format_sql(sql: str, is_pg: bool) -> str:
 
 
 def _get_scalar(row: Any) -> Any:
-    """استخراج قيمة مفردة بأمان من الصف سواء كان Dict أو Row"""
+    """استخراج قيمة مفردة بأمان من الصف سواء كان Dict أو sqlite3.Row أو Tuple"""
     if row is None:
         return None
     if isinstance(row, dict):
         return next(iter(row.values()))
+    try:
+        return row[0]
+    except Exception:
+        return None
+
+
 def _sync_seed_data(cursor, is_pg: bool) -> None:
     """مزامنة بيانات المشتركين والمفاتيح والإعدادات تلقائياً عند التشغيل على السحابة"""
     seed_file = config.BASE_DIR / "seed_data.json"
