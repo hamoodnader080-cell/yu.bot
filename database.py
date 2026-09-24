@@ -19,17 +19,33 @@ try:
 except ImportError:
     PgIntegrityError = Exception
 
+_USE_POSTGRES: Optional[bool] = None
+
 
 def is_postgres() -> bool:
-    """التحقق مما إذا كان البوت يستخدم قاعدة بيانات PostgreSQL السحابية"""
-    return bool(DATABASE_URL and PSYCOPG2_AVAILABLE)
+    """التحقق مما إذا كان البوت يستخدم قاعدة بيانات PostgreSQL السحابية مع تجربة الاتصال التلقائية"""
+    global _USE_POSTGRES
+    if _USE_POSTGRES is not None:
+        return _USE_POSTGRES
+    if not (DATABASE_URL and PSYCOPG2_AVAILABLE):
+        _USE_POSTGRES = False
+        return False
+    try:
+        conn = psycopg2.connect(DATABASE_URL, connect_timeout=3)
+        conn.close()
+        _USE_POSTGRES = True
+        return True
+    except Exception as e:
+        logger.warning(f"⚠️ تعذر الاتصال بـ PostgreSQL السحابية ({e}) - التحويل التلقائي لقاعدة SQLite المحلية.")
+        _USE_POSTGRES = False
+        return False
 
 
 @contextmanager
 def get_db_cursor():
     """Context manager يوفر مؤشر قاعدة البيانات المناسب (PostgreSQL أو SQLite)"""
     if is_postgres():
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         try:
             yield cursor, True
