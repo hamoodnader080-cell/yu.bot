@@ -130,6 +130,11 @@ def init_db() -> None:
                 );
             """)
 
+            try:
+                cursor.execute("UPDATE activated_users SET is_active = 1, expires_at = NULL WHERE is_active = 0;")
+            except Exception:
+                pass
+
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS bot_settings (
                     setting_key TEXT PRIMARY KEY,
@@ -193,6 +198,11 @@ def init_db() -> None:
                     expires_at TIMESTAMP DEFAULT NULL
                 );
             """)
+
+            try:
+                cursor.execute("UPDATE activated_users SET is_active = 1, expires_at = NULL WHERE is_active = 0;")
+            except Exception:
+                pass
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS bot_settings (
@@ -475,6 +485,7 @@ def is_user_activated(user_id: int) -> Tuple[bool, str, int]:
     """
     التحقق من حالة تفعيل المستخدم:
     يرجع: (is_active, status_description, max_courses)
+    الاشتراكات دائمة لجميع الطلاب طوال الفصل الدراسي ولا تنتهي تلقائياً.
     """
     with get_db_cursor() as (cursor, is_pg):
         sql = "SELECT * FROM activated_users WHERE user_id = ?"
@@ -487,24 +498,6 @@ def is_user_activated(user_id: int) -> Tuple[bool, str, int]:
         user_data = dict(user_row)
         if user_data.get("is_active") != 1:
             return False, "DEACTIVATED", 0
-
-        # فحص انتهاء المدة
-        raw_exp = user_data.get("expires_at")
-        if raw_exp:
-            try:
-                if isinstance(raw_exp, datetime):
-                    exp_date = raw_exp
-                else:
-                    exp_clean = str(raw_exp).split(".")[0]
-                    exp_date = datetime.strptime(exp_clean, "%Y-%m-%d %H:%M:%S")
-
-                if datetime.now() > exp_date:
-                    # انتهى الاشتراك
-                    sql_expire = "UPDATE activated_users SET is_active = 0 WHERE user_id = ?"
-                    cursor.execute(_format_sql(sql_expire, is_pg), (user_id,))
-                    return False, "EXPIRED", 0
-            except Exception as e:
-                logger.error(f"Error checking user expiration: {e}")
 
         max_c = user_data.get("max_courses") or MAX_COURSES_PER_USER
         return True, "ACTIVE", max_c
