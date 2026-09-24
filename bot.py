@@ -53,31 +53,54 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
     logger.error(f"خطأ غير معالج: {context.error}")
 
 
-# خادم فحص صحي لدعم الاستضافة السحابية (Render / Cloud)
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+
+# خادم فحص صحي فائق الاستقرار لدعم منصات السحاب (Render / Koyeb / UptimeRobot)
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain; charset=utf-8")
-        self.end_headers()
-        self.wfile.write("OK - YU Bot Running 24/7".encode("utf-8"))
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b"OK - YU Bot Running 24/7")
+        except Exception:
+            pass
 
     def do_HEAD(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain; charset=utf-8")
-        self.end_headers()
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Connection", "close")
+            self.end_headers()
+        except Exception:
+            pass
+
+    def do_POST(self):
+        self.do_GET()
 
     def log_message(self, format, *args):
         pass
 
 
-def start_health_server():
+def _run_single_port_server(port: int):
     try:
-        port = int(os.environ.get("PORT", 10000))
-        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-        logger.info(f"🌐 تم تشغيل خادم الفحص الصحي للسحابة بنجاح على المنفذ {port}")
+        class ReusableServer(ThreadingHTTPServer):
+            allow_reuse_address = True
+            daemon_threads = True
+
+        server = ReusableServer(("0.0.0.0", port), HealthCheckHandler)
+        logger.info(f"🌐 خادم الفحص الصحي للسحابة يعمل بنجاح على المنفذ {port}")
         server.serve_forever()
     except Exception as e:
-        logger.warning(f"Health server note: {e}")
+        logger.debug(f"Port {port} note: {e}")
+
+
+def start_health_server():
+    render_port = int(os.environ.get("PORT", 10000))
+    ports = list(dict.fromkeys([render_port, 10000, 8080, 8000]))
+    for p in ports:
+        threading.Thread(target=_run_single_port_server, args=(p,), daemon=True).start()
 
 
 # حالات محادثة إضافة مادة (خطوتان فقط: رقم المادة -> رقم الشعبة)
