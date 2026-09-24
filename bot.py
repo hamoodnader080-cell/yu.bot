@@ -218,6 +218,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # تسجيل الحدث في قناة السجلات الخاصة
     u_name = html.escape(user.full_name) if user else "مجهول"
     u_user = f"@{user.username}" if user and user.username else "بدون يوزر"
+    if user:
+        db.sync_user_profile(user_id, user.username, user.first_name)
     await send_to_log_channel(
         context,
         f"🟢 <b>مستخدم فتح البوت (/start):</b>\n"
@@ -963,9 +965,10 @@ def build_admin_keys_view(page: int = 1, filter_status: str = "all") -> Tuple[st
             text += f"   ⏱️ <b>المدة:</b> {dur_text} | 📚 <b>المواد:</b> {max_c_text}\n"
 
             if is_used:
-                u_name = f"@{k['used_by_username']}" if k.get("used_by_username") else (k.get("user_first_name") or "مستخدم")
+                user_display = k.get("user_first_name") or (f"@{k['used_by_username']}" if k.get("used_by_username") else "مستخدم")
+                user_tag = f" (@{k['used_by_username']})" if k.get("used_by_username") and k.get("user_first_name") else ""
                 time_left = format_remaining_time(k.get("expires_at"))
-                text += f"   👤 <b>المستخدم:</b> <b>{html.escape(u_name)}</b> (<code>{k.get('used_by_user_id')}</code>)\n"
+                text += f"   👤 <b>المستخدم:</b> <b>{html.escape(user_display)}</b>{html.escape(user_tag)} (<code>{k.get('used_by_user_id')}</code>)\n"
                 text += f"   ⏳ <b>الوقت المتبقي:</b> <code>{time_left}</code>\n"
             else:
                 dur_label = f"{k['duration_days']} يوم" if k.get("duration_days") and k["duration_days"] > 0 else "دائم ♾️"
@@ -974,9 +977,13 @@ def build_admin_keys_view(page: int = 1, filter_status: str = "all") -> Tuple[st
 
             text += "───────────────────\n"
 
-            # الزر الخاص بحذف هذا المفتاح بكبسة واحدة
+            # الزر الخاص بحذف هذا المفتاح مع إظهار اسم المستخدم بجانبه
             short_code = k['key_code']
-            btn_label = f"🗑️ حذف ({short_code})"
+            if is_used:
+                btn_user_name = k.get("user_first_name") or (f"@{k['used_by_username']}" if k.get("used_by_username") else "مستخدم")
+                btn_label = f"🗑️ حذف ({short_code}) - {btn_user_name}"
+            else:
+                btn_label = f"🗑️ حذف ({short_code}) [متاح 🟢]"
             delete_buttons.append([InlineKeyboardButton(btn_label, callback_data=f"delkey_id_{k['id']}_{page}_{filter_status}")])
 
     # أزرار الفلترة
@@ -1049,9 +1056,10 @@ async def admin_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     text = f"👥 <b>قائمة المستخدمين المفعّلين ({len(users)}):</b>\n\n"
     for idx, u in enumerate(users[:30], 1):
         status_icon = "🟢" if u["is_active"] else "🔴"
-        u_name = f"@{u['username']}" if u["username"] else (u["first_name"] or "مستخدم")
+        display_name = u.get("first_name") or "مستخدم"
+        user_tag = f" (@{u['username']})" if u.get("username") else ""
         time_left = format_remaining_time(u.get("expires_at"))
-        text += f"{idx}. {status_icon} <b>{html.escape(u_name)}</b> (<code>{u['user_id']}</code>)\n   🔑 <code>{u['key_code']}</code> | ⏳ <b>المتبقي:</b> <code>{time_left}</code>\n\n"
+        text += f"{idx}. {status_icon} <b>{html.escape(display_name)}</b>{html.escape(user_tag)} (<code>{u['user_id']}</code>)\n   🔑 <code>{u['key_code']}</code> | ⏳ <b>المتبقي:</b> <code>{time_left}</code>\n\n"
 
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 

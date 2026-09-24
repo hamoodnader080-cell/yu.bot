@@ -135,6 +135,11 @@ def init_db() -> None:
                 );
             """)
 
+            try:
+                cursor.execute("ALTER TABLE activation_keys ADD COLUMN used_by_first_name TEXT DEFAULT NULL;")
+            except Exception:
+                pass
+
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS activated_users (
                     user_id BIGINT PRIMARY KEY,
@@ -193,11 +198,17 @@ def init_db() -> None:
                     is_used INTEGER DEFAULT 0,
                     used_by_user_id INTEGER DEFAULT NULL,
                     used_by_username TEXT DEFAULT NULL,
+                    used_by_first_name TEXT DEFAULT NULL,
                     used_at TIMESTAMP DEFAULT NULL,
                     expires_at TIMESTAMP DEFAULT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+
+            try:
+                cursor.execute("ALTER TABLE activation_keys ADD COLUMN used_by_first_name TEXT DEFAULT NULL;")
+            except Exception:
+                pass
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS activated_users (
@@ -475,11 +486,11 @@ def activate_user_with_key(
         # تحديث حالة المفتاح ليصبح مستخدماً ومربوطاً بـ user_id
         sql_update_key = """
             UPDATE activation_keys 
-            SET is_used = 1, used_by_user_id = ?, used_by_username = ?, 
+            SET is_used = 1, used_by_user_id = ?, used_by_username = ?, used_by_first_name = ?,
                 used_at = CURRENT_TIMESTAMP, expires_at = ?
             WHERE id = ?
         """
-        cursor.execute(_format_sql(sql_update_key, is_pg), (user_id, username_clean, expires_at_val, key_data["id"]))
+        cursor.execute(_format_sql(sql_update_key, is_pg), (user_id, username_clean, first_name_clean, expires_at_val, key_data["id"]))
 
         # إضافة أو تحديث المستخدم في جدول المستخدمين المفعّلين بشكل دائم
         max_c = key_data.get("max_courses") or 999
@@ -535,18 +546,48 @@ def is_user_activated(user_id: int) -> Tuple[bool, str, int]:
             # استعادة وتثبيت التفعيل تلقائياً لمنع أي فقدان للتفعيل
             sql_fix = """
                 INSERT INTO activated_users (user_id, username, first_name, key_code, is_active, max_courses, activated_at, expires_at)
-                VALUES (?, ?, '', ?, 1, ?, CURRENT_TIMESTAMP, NULL)
+                VALUES (?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP, NULL)
                 ON CONFLICT(user_id) DO UPDATE SET is_active = 1, max_courses = excluded.max_courses
             """
             cursor.execute(_format_sql(sql_fix, is_pg), (
                 user_id,
                 k_data.get("used_by_username", ""),
+                k_data.get("used_by_first_name", ""),
                 k_data.get("key_code", ""),
                 max_c
             ))
             return True, "ACTIVE", max_c
 
         return False, "NOT_ACTIVATED", 0
+
+
+def sync_user_profile(user_id: int, username: Optional[str] = None, first_name: Optional[str] = None) -> None:
+    """تحديث الاسم الشخصي واسم المستخدم في قاعدة البيانات عند أي تفاعل"""
+    if not user_id:
+        return
+    u_clean = username.strip() if username else ""
+    f_clean = first_name.strip() if first_name else ""
+    if not u_clean and not f_clean:
+        return
+    try:
+        with get_db_cursor() as (cursor, is_pg):
+            if f_clean and u_clean:
+                sql_u = "UPDATE activated_users SET username = ?, first_name = ? WHERE user_id = ?"
+                cursor.execute(_format_sql(sql_u, is_pg), (u_clean, f_clean, user_id))
+                sql_k = "UPDATE activation_keys SET used_by_username = ?, used_by_first_name = ? WHERE used_by_user_id = ?"
+                cursor.execute(_format_sql(sql_k, is_pg), (u_clean, f_clean, user_id))
+            elif f_clean:
+                sql_u = "UPDATE activated_users SET first_name = ? WHERE user_id = ?"
+                cursor.execute(_format_sql(sql_u, is_pg), (f_clean, user_id))
+                sql_k = "UPDATE activation_keys SET used_by_first_name = ? WHERE used_by_user_id = ?"
+                cursor.execute(_format_sql(sql_k, is_pg), (f_clean, user_id))
+            elif u_clean:
+                sql_u = "UPDATE activated_users SET username = ? WHERE user_id = ?"
+                cursor.execute(_format_sql(sql_u, is_pg), (u_clean, user_id))
+                sql_k = "UPDATE activation_keys SET used_by_username = ? WHERE used_by_user_id = ?"
+                cursor.execute(_format_sql(sql_k, is_pg), (u_clean, user_id))
+    except Exception:
+        pass
 
 
 def get_user_activation_details(user_id: int) -> Optional[Dict[str, Any]]:
@@ -574,7 +615,7 @@ def get_all_keys(filter_status: Optional[str] = None, limit: int = 50) -> List[D
             k.id, k.key_code, k.duration_days, k.max_courses, 
             k.is_used, k.used_by_user_id, k.used_by_username, 
             k.used_at, k.expires_at, k.created_at,
-            u.first_name as user_first_name,
+            COALESCE(NULLIF(u.first_name, ''), NULLIF(k.used_by_first_name, '')) as user_first_name,
             u.is_active as user_is_active
         FROM activation_keys k
         LEFT JOIN activated_users u ON k.used_by_user_id = u.user_id
@@ -613,7 +654,7 @@ def get_all_keys_paginated(
             k.id, k.key_code, k.duration_days, k.max_courses, 
             k.is_used, k.used_by_user_id, k.used_by_username, 
             k.used_at, k.expires_at, k.created_at,
-            u.first_name as user_first_name,
+            COALESCE(NULLIF(u.first_name, ''), NULLIF(k.used_by_first_name, '')) as user_first_name,
             u.is_active as user_is_active
         FROM activation_keys k
         LEFT JOIN activated_users u ON k.used_by_user_id = u.user_id
@@ -643,7 +684,7 @@ def get_key_by_id(key_id: int) -> Optional[Dict[str, Any]]:
     sql = """
         SELECT 
             k.*, 
-            u.first_name as user_first_name,
+            COALESCE(NULLIF(u.first_name, ''), NULLIF(k.used_by_first_name, '')) as user_first_name,
             u.is_active as user_is_active
         FROM activation_keys k
         LEFT JOIN activated_users u ON k.used_by_user_id = u.user_id
@@ -660,7 +701,7 @@ def get_key_by_code(key_code: str) -> Optional[Dict[str, Any]]:
     sql = """
         SELECT 
             k.*, 
-            u.first_name as user_first_name,
+            COALESCE(NULLIF(u.first_name, ''), NULLIF(k.used_by_first_name, '')) as user_first_name,
             u.is_active as user_is_active
         FROM activation_keys k
         LEFT JOIN activated_users u ON k.used_by_user_id = u.user_id
