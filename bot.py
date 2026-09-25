@@ -1875,13 +1875,21 @@ async def callback_query_router(update: Update, context: ContextTypes.DEFAULT_TY
 # دورة الفحص التلقائي بالخلفية (Background Repeating Scanner Job)
 # ====================================================================
 
+_is_scanner_running = False
+
 async def background_course_scanner(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     وظيفة تعمل باستمرار في الخلفية كل X ثانية:
     تفحص كافة المواد المراقبة لجميع الطلاب، وترسل تنبيهاً فورياً عند توفر مقعد!
     """
+    global _is_scanner_running
+    if _is_scanner_running:
+        return
+
+    _is_scanner_running = True
     active_courses = db.get_all_active_courses()
     if not active_courses:
+        _is_scanner_running = False
         return
 
     for c in active_courses:
@@ -2070,6 +2078,8 @@ async def background_course_scanner(context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as e:
             logger.error(f"خطأ أثناء فحص المادة {c.get('course_no')}: {e}")
 
+    _is_scanner_running = False
+
 
 # ==========================================
 # تشغيل وتهيئة البوت (Main Entrypoint)
@@ -2110,10 +2120,14 @@ def main() -> None:
             CommandHandler("cancel", cancel_conversation),
             CommandHandler("start", start_command),
             CommandHandler("list", list_courses_handler),
-            CommandHandler("help", help_command)
+            CommandHandler("help", help_command),
+            CommandHandler("admin", admin_stats_command),
+            CommandHandler("status", status_command),
+            CallbackQueryHandler(callback_query_router)
         ],
         allow_reentry=True,
-        per_message=False
+        per_message=False,
+        block=False
     )
 
     # تسجيل المعالجات (Handlers)
