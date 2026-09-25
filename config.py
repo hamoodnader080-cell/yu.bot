@@ -36,7 +36,7 @@ EMAIL_PORT = int(os.getenv("EMAIL_PORT", "993"))
 
 
 DATABASE_PATH = os.getenv("DATABASE_PATH", str(BASE_DIR / "yu_tracker.db"))
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://yu_db_user:ePTcrUR2FzZYBfYAbbmy9OQNOesEieQT@dpg-daqjgfff3r2c73bj3e9g-a/yu_db").strip()
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
