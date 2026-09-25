@@ -18,7 +18,7 @@ except ImportError:
                     os.environ.setdefault(k.strip(), v.strip())
 
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8806949560:AAHsvpvaKafLTtvnMQkfXZ2jg_0oBxJ-Xg0").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8806949560:AAEFwW0jtUiZHuLRH6QOCUuqW6N0Q9h-39g").strip()
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "10"))
 DEMO_MODE = os.getenv("DEMO_MODE", "False").lower() in ("true", "1", "yes", "y")
 
