@@ -449,12 +449,7 @@ class YarmoukScraper:
                     error_message=f"المادة {display_code} ({matched_course_desc}) مطروحة، لكن الشعبة {sec_clean} غير موجودة."
                 )
 
-            # إذا لم يتم العثور على أي صف، وكان مسموحاً بالمحاولة مرة واحدة بعد تجديد التوكنز
-            if retry_on_fail:
-                logger.info(f"لم يتم العثور على نتائج للمادة {display_code}، جاري تجديد التوكنز للتأكد...")
-                if self.auto_relogin():
-                    return self._sync_check_course(course_no, section_no, course_name, retry_on_fail=False)
-
+            # إذا لم يتم العثور على أي صف
             return CourseCheckResult(
                 course_no=display_code,
                 section_no=sec_clean,
