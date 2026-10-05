@@ -1816,6 +1816,11 @@ async def handle_general_text_and_activation(update: Update, context: ContextTyp
     elif sis_st == "WAITING_OTP":
         return await receive_sis_otp(update, context)
 
+    # 2. التعرف الذكي التلقائي: إذا أرسل المستخدم رقماً جامعياً (7 إلى 11 خانة يبدأ بـ 20)
+    digits = re.sub(r"\D", "", text)
+    if 7 <= len(digits) <= 11 and digits.startswith("20") and not text.upper().startswith("YU-"):
+        return await receive_sis_id(update, context)
+
     # إذا كان المستخدم مفعلاً بالفعل، لا داعي لمعالجة التفعيل
     is_act, _, _ = check_user_access(user_id)
     if is_act:
