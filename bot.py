@@ -715,7 +715,9 @@ async def receive_sis_password(update: Update, context: ContextTypes.DEFAULT_TYP
             [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")]
         ]
         await wait_msg.edit_text(
-            "❌ <b>فشل تسجيل الدخول:</b>\n\nالرقم الجامعي أو كلمة المرور غير صحيحة. يرجى التأكد من بياناتك والمحاولة مجدداً.",
+            "❌ <b>فشل تسجيل الدخول:</b>\n\n"
+            "⚠️ <b>الرقم الجامعي أو كلمة المرور غير صحيحة!</b>\n\n"
+            "💡 يرجى التأكد من كتابة كلمة مرور نظام الـ SIS بدقة والمحاولة مجدداً.",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.HTML
         )
@@ -730,9 +732,12 @@ async def receive_sis_password(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data["sis_password"] = password
 
         otp_prompt = (
-            "📩 <b>تم إرسال رمز التحقق (OTP) إلى بريدك الجامعي!</b>\n\n"
-            "يرجى كتابة الرمز المكون من 6 أرقام هنا لإتمام الدخول (مثال: <code>489210</code>):\n"
-            "⏳ <i>بانتظارك لتأكيد العملية...</i>\n\n"
+            "📩 <b>تم إرسال رمز التحقق إلى حسابك الجامعي!</b>\n\n"
+            "🔍 <b>يرجى فحص:</b>\n"
+            "📧 <b>بريدك الجامعي (Outlook)</b>\n"
+            "📱 أو <b>رسائل الـ SMS النصية</b> على هاتفك\n\n"
+            "🔢 أرسل الرمز المكون من 6 أرقام هنا لإتمام الدخول (مثال: <code>489210</code>):\n"
+            "⏳ <i>بانتظار إدخال الرمز لتأكيد ربط كليتك...</i>\n\n"
             "<i>(يمكنك إرسال /cancel في أي وقت للإلغاء)</i>"
         )
         await wait_msg.edit_text(otp_prompt, parse_mode=ParseMode.HTML)
@@ -764,9 +769,14 @@ async def receive_sis_password(update: Update, context: ContextTypes.DEFAULT_TYP
         return ConversationHandler.END
 
     else:
-        keyboard = [[InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")]]
+        keyboard = [
+            [InlineKeyboardButton("🔄 إعادة المحاولة", callback_data="btn_link_sis")],
+            [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")]
+        ]
         await wait_msg.edit_text(
-            f"⚠️ <b>حدث خطأ أثناء الاتصال بنظام الجامعة:</b>\n{html.escape(res.get('error', 'خطأ غير معروف'))}\n\nيرجى المحاولة لاحقاً.",
+            "❌ <b>فشل تسجيل الدخول:</b>\n\n"
+            "⚠️ <b>الرقم الجامعي أو كلمة المرور غير صحيحة!</b>\n\n"
+            "💡 يرجى التأكد من كتابة كلمة مرور نظام الـ SIS بدقة والمحاولة مجدداً.",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.HTML
         )
@@ -780,7 +790,7 @@ async def receive_sis_otp(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     digits = re.sub(r"\D", "", otp_code)
     if len(digits) < 4:
         await update.message.reply_text(
-            "⚠️ <b>رمز التحقق غير صالح!</b>\nيرجى إرسال الرمز المكون من 6 أرقام كما وصلك على البريد الجامعي (مثال: <code>489210</code>):",
+            "⚠️ <b>رمز التحقق غير صالح!</b>\nيرجى إرسال الرمز المكون من 6 أرقام كما وصلك على البريد الجامعي أو الهاتف (مثال: <code>489210</code>):",
             parse_mode=ParseMode.HTML
         )
         return STATE_SIS_OTP
@@ -829,7 +839,8 @@ async def receive_sis_otp(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     elif res.get("status") == "INVALID_OTP":
         await wait_msg.edit_text(
-            "❌ <b>رمز التحقق غير صحيح أو منتهي الصلاحية!</b>\n\nيرجى إعادة كتابة الرمز الصحيح هنا:",
+            "❌ <b>رمز التحقق غير صحيح أو منتهي الصلاحية!</b>\n\n"
+            "⚠️ يرجى التأكد من كتابة أحدث رمز وصلك على <b>Outlook</b> أو عبر <b>SMS</b> وإرساله هنا:",
             parse_mode=ParseMode.HTML
         )
         return STATE_SIS_OTP

@@ -560,7 +560,7 @@ def login_student_step1(student_id: str, student_password: str) -> Dict[str, Any
         }
         resp_login = session.post(post_url, data=login_payload, headers=headers_post, timeout=REQUEST_TIMEOUT, allow_redirects=True)
 
-        if "اسم المستخدم أو كلمة المرور غير صحيحة" in resp_login.text or "invalid login" in resp_login.text.lower() or "P9999_PASSWORD" in resp_login.text and "login" in resp_login.url:
+        if "اسم المستخدم أو كلمة المرور غير صحيحة" in resp_login.text or "invalid login" in resp_login.text.lower() or "P9999_PASSWORD" in resp_login.text or "login" in resp_login.url.lower() or "p9999" in resp_login.text.lower():
             return {"status": "INVALID_CREDENTIALS", "error": "الرقم الجامعي أو كلمة المرور غير صحيحة."}
 
         m_new = re.search(r"session=(\d+)", resp_login.text) or re.search(r"session=(\d+)", resp_login.url)
@@ -572,6 +572,9 @@ def login_student_step1(student_id: str, student_password: str) -> Dict[str, Any
             headers=headers_get,
             timeout=REQUEST_TIMEOUT
         )
+
+        if "اسم المستخدم أو كلمة المرور غير صحيحة" in r_verify_check.text or "login" in r_verify_check.url.lower() or "P9999_USERNAME" in r_verify_check.text:
+            return {"status": "INVALID_CREDENTIALS", "error": "الرقم الجامعي أو كلمة المرور غير صحيحة."}
 
         is_otp_page = (
             "تفعيل رمز التحقق" in r_verify_check.text or
@@ -609,7 +612,7 @@ def login_student_step1(student_id: str, student_password: str) -> Dict[str, Any
                 "salt_val": tokens["salt_val"]
             }
         else:
-            return {"status": "ERROR", "error": "تعذر تهيئة جدول الشعب والتقارير للجلسة."}
+            return {"status": "INVALID_CREDENTIALS", "error": "الرقم الجامعي أو كلمة المرور غير صحيحة."}
 
     except Exception as e:
         logger.error(f"خطأ أثناء login_student_step1: {e}")
