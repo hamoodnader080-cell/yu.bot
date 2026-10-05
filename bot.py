@@ -562,6 +562,8 @@ async def receive_section_no(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
     if res.error_message and res.raw_status in ["NOT_FOUND", "SECTION_NOT_FOUND", "ERROR"]:
+        # حذف المادة تلقائياً لأنها غير موجودة حتى لا تشغل مكاناً في قائمة الطالب
+        db.delete_course(saved_course["id"], user_id)
         msg = (
             "⚠️ <b>لم يتم العثور على المادة أو الشعبة في جدول الجامعة!</b>\n\n"
             f"🔍 <b>المادة المدخلة:</b> <code>{html.escape(course_no)}</code> - <b>الشعبة:</b> <code>{html.escape(section_no)}</code>\n\n"
@@ -569,7 +571,7 @@ async def receive_section_no(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "1️⃣ <b>رمز المادة كُتب بالخطأ:</b> تأكد من كتابة الحروف والأرقام بدقة (مثال: <code>CS101</code> أو <code>CPE231</code> أو <code>FT200</code>).\n"
             "2️⃣ <b>المادة غير مطروحة في خطتك:</b> قد تكون المادة غير مدرجة لتخصصك أو غير مطروحة هذا الفصل في جدول كليتك.\n"
             "3️⃣ <b>رقم الشعبة غير صحيح:</b> تأكد من رقم الشعبة المطروحة في جدول المواد.\n\n"
-            "📌 <i>ملاحظة: يمكنك التحقق من رمز المادة ورقم الشعبة من جدول الـ SIS وإعادة إضافتها.</i>"
+            "🗑️ <i>تم حذف المادة تلقائياً ولن تظهر في قائمة موادك المراقبة.</i>"
         )
     elif res.is_available:
         msg = (
