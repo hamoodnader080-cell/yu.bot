@@ -2502,7 +2502,6 @@ def main() -> None:
     application.add_handler(CommandHandler("check", check_command_direct))
     application.add_handler(CommandHandler("myid", my_id_command))
     application.add_handler(CommandHandler("activate", activate_command))
-    application.add_handler(CommandHandler("linksis", start_link_sis_conversation))
     application.add_handler(CommandHandler("sis", sis_info_handler))
     
     # أوامر الأدمن والمشرفين
