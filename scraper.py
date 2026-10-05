@@ -560,26 +560,21 @@ def login_student_step1(student_id: str, student_password: str) -> Dict[str, Any
         }
         resp_login = session.post(post_url, data=login_payload, headers=headers_post, timeout=REQUEST_TIMEOUT, allow_redirects=True)
 
-        if "اسم المستخدم أو كلمة المرور غير صحيحة" in resp_login.text or "invalid login" in resp_login.text.lower() or "P9999_PASSWORD" in resp_login.text or "login" in resp_login.url.lower() or "p9999" in resp_login.text.lower():
-            return {"status": "INVALID_CREDENTIALS", "error": "الرقم الجامعي أو كلمة المرور غير صحيحة."}
-
         m_new = re.search(r"session=(\d+)", resp_login.text) or re.search(r"session=(\d+)", resp_login.url)
         session_id = m_new.group(1) if m_new else inst_val
 
-        # فحص ما إذا كانت الصفحة تطلب تفعيل رمز التحقق (OTP)
+        # فحص ما إذا كانت الصفحة تطلب تفعيل رمز التحقق (OTP) أو تم الدخول
         r_verify_check = session.get(
             f"{YU_PORTAL_URL}/ords/r/sis/sis/home?session={session_id}",
             headers=headers_get,
             timeout=REQUEST_TIMEOUT
         )
 
-        if "اسم المستخدم أو كلمة المرور غير صحيحة" in r_verify_check.text or "login" in r_verify_check.url.lower() or "P9999_USERNAME" in r_verify_check.text:
-            return {"status": "INVALID_CREDENTIALS", "error": "الرقم الجامعي أو كلمة المرور غير صحيحة."}
-
         is_otp_page = (
             "تفعيل رمز التحقق" in r_verify_check.text or
             "P9990_OTP_CODE" in r_verify_check.text or
-            "page-9990" in r_verify_check.text
+            "page-9990" in r_verify_check.text or
+            "P9990_OTP_CODE" in resp_login.text
         )
 
         if is_otp_page:
@@ -611,8 +606,12 @@ def login_student_step1(student_id: str, student_password: str) -> Dict[str, Any
                 "protected_val": tokens["protected_val"],
                 "salt_val": tokens["salt_val"]
             }
-        else:
+
+        # إذا لم يتم استخراج التوكنز ولم تكن صفحة OTP، نتأكد من خطأ كلمة المرور
+        if "اسم المستخدم أو كلمة المرور غير صحيحة" in resp_login.text or "invalid login" in resp_login.text.lower() or "اسم المستخدم أو كلمة المرور غير صحيحة" in r_verify_check.text or "P9999_USERNAME" in r_verify_check.text:
             return {"status": "INVALID_CREDENTIALS", "error": "الرقم الجامعي أو كلمة المرور غير صحيحة."}
+        
+        return {"status": "INVALID_CREDENTIALS", "error": "الرقم الجامعي أو كلمة المرور غير صحيحة."}
 
     except Exception as e:
         logger.error(f"خطأ أثناء login_student_step1: {e}")
