@@ -318,13 +318,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         ],
         [
             sis_btn
-        ],
-        [
-            InlineKeyboardButton("🔍 فحص سريع لشعبة", callback_data="btn_quick_check"),
-            InlineKeyboardButton("⚙️ حالة البوت", callback_data="btn_bot_status")
-        ],
-        [
-            InlineKeyboardButton("🌐 رابط نظام التسجيل (SIS)", url=config.YU_PORTAL_URL)
         ]
     ]
 
