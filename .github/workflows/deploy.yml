@@ -1,0 +1,50 @@
+name: Deploy to Amazon EC2
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            echo "🚀 Starting deployment..."
+            
+            # الانتقال لمجلد المشروع (سواء كان yu.bot أو في المسار الرئيسي)
+            if [ -d "yu.bot" ]; then
+              cd yu.bot
+            elif [ -d "anti" ]; then
+              cd anti
+            fi
+            
+            echo "📥 Pulling latest code..."
+            git pull origin main
+            
+            echo "📦 Updating requirements..."
+            if [ -d "venv" ]; then
+              source venv/bin/activate
+              pip install -r requirements.txt
+            else
+              pip3 install -r requirements.txt --break-system-packages 2>/dev/null || pip3 install -r requirements.txt
+            fi
+            
+            echo "🔄 Restarting Bot process..."
+            if command -v pm2 &> /dev/null; then
+              pm2 restart all
+            elif systemctl list-units --full -all | grep -q "yu-bot.service"; then
+              sudo systemctl restart yu-bot
+            else
+              pkill -f bot.py || true
+              sleep 2
+              nohup python3 bot.py > bot.log 2>&1 &
+            fi
+            
+            echo "✅ Deployment completed successfully!"
