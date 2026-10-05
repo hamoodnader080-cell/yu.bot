@@ -1074,14 +1074,19 @@ async def process_activation_key(update: Update, context: ContextTypes.DEFAULT_T
             f"📚 <b>عدد المواد المسموحة:</b> <code>{max_c_text}</code>\n\n"
             "🚀 <b>تم فتح كافة خدمات البوت لك الآن!</b> يمكنك البدء بإضافة موادك لمراقبة المقاعد الشاغرة فوراً:"
         )
+        user_sis = db.get_user_sis_session(user_id)
+        if user_sis:
+            sis_btn = InlineKeyboardButton(f"🎓 حسابي في SIS ({user_sis['student_id']} ✅)", callback_data="btn_sis_info")
+        else:
+            sis_btn = InlineKeyboardButton("🎓 ربط حسابي في SIS (لكل الكليات)", callback_data="btn_link_sis")
+
         keyboard = [
             [
                 InlineKeyboardButton("➕ إضافة مادة للمراقبة", callback_data="btn_add_course"),
                 InlineKeyboardButton("📋 موادي المراقبة", callback_data="btn_list_courses")
             ],
             [
-                InlineKeyboardButton("🔍 فحص سريع لشعبة", callback_data="btn_quick_check"),
-                InlineKeyboardButton("⚙️ حالة البوت", callback_data="btn_bot_status")
+                sis_btn
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
