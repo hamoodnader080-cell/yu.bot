@@ -4,6 +4,7 @@ import html
 import os
 import sys
 import time
+import re
 import threading
 from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
