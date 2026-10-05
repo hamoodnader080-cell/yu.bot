@@ -419,6 +419,30 @@ def get_user_sis_session(user_id: int) -> Optional[Dict[str, Any]]:
         return res
 
 
+def get_user_sis_account(user_id: int) -> Optional[Dict[str, Any]]:
+    """استرجاع حساب الطالب في SIS سواء كان نشطاً أو منتهي الصلاحية"""
+    with get_db_cursor() as (cursor, is_pg):
+        sql = _format_sql("SELECT * FROM user_sis_accounts WHERE user_id = ? LIMIT 1;", is_pg)
+        cursor.execute(sql, (user_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        res = dict(row)
+        try:
+            res["cookies"] = json.loads(res.get("cookies_json") or "{}")
+        except Exception:
+            res["cookies"] = {}
+        return res
+
+
+def set_user_sis_session_expired(user_id: int) -> bool:
+    """تعيين جلسة الطالب كـ منتهية الصلاحية"""
+    with get_db_cursor() as (cursor, is_pg):
+        sql = _format_sql("UPDATE user_sis_accounts SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?;", is_pg)
+        cursor.execute(sql, (user_id,))
+        return True
+
+
 def delete_user_sis_session(user_id: int) -> bool:
     """إلغاء ربط أو حذف جلسة الطالب"""
     with get_db_cursor() as (cursor, is_pg):

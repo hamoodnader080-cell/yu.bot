@@ -295,11 +295,17 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     name = html.escape(user.first_name) if user and user.first_name else "طالبنا العزيز"
     role_badge = " 👑 (المالك)" if is_owner(user_id) else (" 🛡️ (مشرف)" if is_admin(user_id) else "")
 
-    user_sis = db.get_user_sis_session(user_id)
+    user_sis = db.get_user_sis_account(user_id)
     sis_status_badge = ""
     if user_sis:
-        sis_btn = InlineKeyboardButton(f"🎓 حسابي في SIS ({user_sis['student_id']} ✅)", callback_data="btn_sis_info")
-        sis_status_badge = f"\n🎓 <b>حساب SIS المرتبط:</b> <code>{user_sis['student_id']}</code> (لكليتك) ✅\n"
+        s_id = user_sis["student_id"]
+        is_active = user_sis.get("is_active") == 1
+        if is_active:
+            sis_btn = InlineKeyboardButton(f"🎓 حسابي في SIS ({s_id} ✅)", callback_data="btn_sis_info")
+            sis_status_badge = f"\n🎓 <b>حساب SIS المرتبط:</b> <code>{s_id}</code> (لكليتك) ✅\n"
+        else:
+            sis_btn = InlineKeyboardButton(f"⚠️ جلسة SIS منتهية ({s_id} 🔴)", callback_data="btn_sis_info")
+            sis_status_badge = f"\n⚠️ <b>تنبيه:</b> انتهت صلاحية جلسة حسابك (<code>{s_id}</code>). يرجى تجديد الدخول.\n"
     else:
         sis_btn = InlineKeyboardButton("🎓 ربط حسابي في SIS (لكل الكليات)", callback_data="btn_link_sis")
     
@@ -839,19 +845,32 @@ async def receive_sis_otp(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def sis_info_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """عرض معلومات حساب الـ SIS المرتبط بالبوت وخيارات إدارته"""
     user_id = update.effective_user.id
-    user_sis = db.get_user_sis_session(user_id)
+    user_sis = db.get_user_sis_account(user_id)
     if not user_sis:
         return await start_link_sis_conversation(update, context)
 
+    s_id = user_sis["student_id"]
+    is_active = user_sis.get("is_active") == 1
+
+    if is_active:
+        status_str = "متصل ونشط ✅"
+        note_str = "يتم استخدام حسابك لقراءة والوصول لشعب ومواد كليتك وتخصصك بدقة وسرعة."
+        btn_relogin_text = "🔄 تحديث / إعادة تسجيل الدخول"
+    else:
+        status_str = "منتهية الصلاحية (Expired) 🔴"
+        note_str = "نظام الجامعة يسجل خروجاً تلقائياً دورياً للأمان. يرجى التجديد لاستمرار فحص مواد كليتك."
+        btn_relogin_text = "🔄 تجديد تسجيل الدخول الآن"
+
     info_text = (
-        "🎓 <b>حساب الـ SIS المرتبط بالبوت:</b>\n\n"
-        f"👤 <b>الرقم الجامعي:</b> <code>{user_sis['student_id']}</code>\n"
-        "🟢 <b>الحالة:</b> نشط ومتصل بقاعدة بيانات كليتك ✅\n"
+        "🎓 <b>حالة حساب نظام الـ SIS:</b>\n\n"
+        f"👤 <b>الرقم الجامعي:</b> <code>{s_id}</code>\n"
+        f"📊 <b>حالة الجلسة:</b> <code>{status_str}</code>\n"
         f"⏱️ <b>آخر تحديث:</b> {user_sis.get('updated_at', 'مؤخراً')}\n\n"
-        "💡 <i>يستخدم البوت هذا الحساب لجلب شعب ومقاعد كليتك وتخصصك بدقة وسرعة فائقة.</i>"
+        f"💡 <b>ملاحظة:</b> {note_str}\n\n"
+        "👇 <b>الخيارات المتاحة:</b>"
     )
     keyboard = [
-        [InlineKeyboardButton("🔄 تحديث / إعادة تسجيل الدخول", callback_data="btn_link_sis")],
+        [InlineKeyboardButton(btn_relogin_text, callback_data="btn_link_sis")],
         [InlineKeyboardButton("🗑️ إلغاء ربط الحساب", callback_data="btn_unlink_sis")],
         [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")]
     ]
