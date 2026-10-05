@@ -285,30 +285,66 @@ class YarmoukScraper:
             logger.error(f"خطأ أثناء محاولة التجديد التلقائي: {e}")
             return False
 
-    async def check_course(self, course_no: str, section_no: str, course_name: str = "") -> CourseCheckResult:
-        """فحص حالة المادة والشعبة بشكل غير متزامن"""
+    async def check_course(
+        self, 
+        course_no: str, 
+        section_no: str, 
+        course_name: str = "",
+        user_session_data: Optional[Dict[str, Any]] = None
+    ) -> CourseCheckResult:
+        """فحص حالة المادة والشعبة بشكل غير متزامن (مع دعم جلسة الطالب الخاصة إن وجدت)"""
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self._sync_check_course, course_no, section_no, course_name)
+        return await loop.run_in_executor(None, self._sync_check_course, course_no, section_no, course_name, True, user_session_data)
 
-    def _sync_check_course(self, course_no: str, section_no: str, course_name: str = "", retry_on_fail: bool = True) -> CourseCheckResult:
-        # التأكد من تهيئة الجلسة والتوكنز
-        if not self.session_id or not self.report_req_id or not self.protected_val:
-            if not self.auto_relogin():
-                if not DEMO_MODE:
-                    return CourseCheckResult(
-                        course_no=course_no,
-                        section_no=section_no,
-                        course_name=course_name or course_no,
-                        raw_status="ERROR",
-                        error_message="تعذر الاتصال ببوابة الجامعة SIS لتسجيل الدخول."
-                    )
+    def _sync_check_course(
+        self, 
+        course_no: str, 
+        section_no: str, 
+        course_name: str = "", 
+        retry_on_fail: bool = True,
+        user_session_data: Optional[Dict[str, Any]] = None
+    ) -> CourseCheckResult:
+        # إذا تم تمرير جلسة خاصة بالطالب وكانت مكتملة
+        target_session = self.session
+        target_session_id = self.session_id
+        target_report_req_id = self.report_req_id
+        target_protected_val = self.protected_val
+        target_salt_val = self.salt_val
+
+        if user_session_data and user_session_data.get("session_id") and user_session_data.get("report_req_id"):
+            u_sess = requests.Session()
+            u_cookies = user_session_data.get("cookies") or {}
+            for k, v in u_cookies.items():
+                u_sess.cookies.set(k, v, domain="sis.yu.edu.jo")
+            target_session = u_sess
+            target_session_id = user_session_data["session_id"]
+            target_report_req_id = user_session_data["report_req_id"]
+            target_protected_val = user_session_data.get("protected_val") or ""
+            target_salt_val = user_session_data.get("salt_val") or ""
+        else:
+            # استخدام الجلسة المركزية والتأكد من تهيئتها
+            if not self.session_id or not self.report_req_id or not self.protected_val:
+                if not self.auto_relogin():
+                    if not DEMO_MODE:
+                        return CourseCheckResult(
+                            course_no=course_no,
+                            section_no=section_no,
+                            course_name=course_name or course_no,
+                            raw_status="ERROR",
+                            error_message="تعذر الاتصال ببوابة الجامعة SIS لتسجيل الدخول."
+                        )
+            target_session = self.session
+            target_session_id = self.session_id
+            target_report_req_id = self.report_req_id
+            target_protected_val = self.protected_val
+            target_salt_val = self.salt_val
 
         cre_code, cre_no = parse_course_symbol_and_num(course_no)
         sec_clean = str(section_no).strip()
         display_code = f"{cre_code} {cre_no}".strip() if cre_code else course_no.strip()
 
-        ajax_url = f"{YU_PORTAL_URL}/ords/wwv_flow.ajax?p_context=sis/class-rooms-information/{self.session_id}"
-        class_url = f"{YU_PORTAL_URL}/ords/r/sis/sis/class-rooms-information?session={self.session_id}"
+        ajax_url = f"{YU_PORTAL_URL}/ords/wwv_flow.ajax?p_context=sis/class-rooms-information/{target_session_id}"
+        class_url = f"{YU_PORTAL_URL}/ords/r/sis/sis/class-rooms-information?session={target_session_id}"
 
         # تجهيز عناصر البحث
         search_text = ""
@@ -318,9 +354,9 @@ class YarmoukScraper:
         payload = {
             "p_flow_id": "1010",
             "p_flow_step_id": "3",
-            "p_instance": self.session_id,
+            "p_instance": target_session_id,
             "p_debug": "",
-            "p_request": self.report_req_id,
+            "p_request": target_report_req_id,
             "p_json": json.dumps({
                 "pageItems": {
                     "itemsToSubmit": [
@@ -330,11 +366,11 @@ class YarmoukScraper:
                         {"n": "P3_CRE_NO", "v": str(cre_no)},
                         {"n": "P3_LTR_NAME", "v": ""}
                     ],
-                    "protected": self.protected_val,
+                    "protected": target_protected_val,
                     "rowVersion": "",
                     "formRegionChecksums": []
                 },
-                "salt": self.salt_val
+                "salt": target_salt_val
             })
         }
 
@@ -350,9 +386,9 @@ class YarmoukScraper:
         }
 
         try:
-            resp = self.session.post(ajax_url, headers=headers, data=payload, timeout=REQUEST_TIMEOUT)
+            resp = target_session.post(ajax_url, headers=headers, data=payload, timeout=REQUEST_TIMEOUT)
             
-            # إذا انتهت الجلسة أو حدث خطأ في التطبيق، نجدد الجلسة ونحاول مرة أخرى
+            # إذا انتهت الجلسة أو حدث خطأ في التطبيق
             is_error_response = (
                 resp.status_code != 200 or 
                 "session expired" in resp.text.lower() or 
@@ -360,10 +396,15 @@ class YarmoukScraper:
                 '"error"' in resp.text
             )
 
-            if is_error_response and retry_on_fail:
-                logger.warning("انتهت الجلسة أو واجه النظام خطأ، جاري تجديد التوكنز وإعادة المحاولة...")
-                if self.auto_relogin():
-                    return self._sync_check_course(course_no, section_no, course_name, retry_on_fail=False)
+            if is_error_response:
+                if user_session_data:
+                    # في حال كانت جلسة خاصة بالطالب وانتهت، نجرب الفحص بالجلسة المركزية
+                    logger.warning("انتهت جلسة الطالب الخاصة، التحويل للجلسة المركزية...")
+                    return self._sync_check_course(course_no, section_no, course_name, retry_on_fail=True, user_session_data=None)
+                elif retry_on_fail:
+                    logger.warning("انتهت الجلسة المركزية، جاري تجديد التوكنز وإعادة المحاولة...")
+                    if self.auto_relogin():
+                        return self._sync_check_course(course_no, section_no, course_name, retry_on_fail=False)
 
             soup = BeautifulSoup(resp.text, "html.parser")
             tables = soup.find_all("table")
@@ -377,22 +418,7 @@ class YarmoukScraper:
                     if len(cells) < 14:
                         continue
 
-                    # استخراج الحقول بالترتيب:
-                    # 0: رمز المساق (e.g. CS)
-                    # 1: رقم المساق (e.g. 111L)
-                    # 2: وصف المساق (e.g. مختبر البرمجة بلغة مختارة)
-                    # 3: عدد الساعات (e.g. 1)
-                    # 4: الشعبة (e.g. 4)
-                    # 5..10: السبت (5), الاحد (6), الاثنين (7), الثلاثاء (8), الاربعاء (9), الخميس (10)
-                    # 11: اسم المدرس (e.g. امل ابو ناصر)
-                    # 12: من الساعة (e.g. 09:30)
-                    # 13: الى الساعة (e.g. 11:00)
-                    # 14: نسبة الاشغال
-                    # 15: المقاعد المتاحة (e.g. 1)
-                    # 16: رمز القاعة (e.g. خز 216)
-                    # 17: طريقة التدريس (e.g. وجاهي)
-
-                    # تجاهل صف العناوين
+                    # استخراج الحقول بالترتيب
                     if cells[0] == "رمز المساق" or cells[4] == "الشعبة":
                         continue
 
@@ -467,3 +493,226 @@ class YarmoukScraper:
                 raw_status="ERROR",
                 error_message=f"حدث خطأ أثناء الاتصال بالنظام: {str(e)}"
             )
+
+
+# ====================================================================
+# وظائف تسجيل الدخول التفاعلي للطالب وربط الحساب (Student Login Flow)
+# ====================================================================
+
+def login_student_step1(student_id: str, student_password: str) -> Dict[str, Any]:
+    """
+    الخطوة 1: بدء تسجيل دخول الطالب في نظام SIS
+    النتائج المحتملة:
+    - {"status": "SUCCESS", "session_id": ..., "cookies": ..., "report_req_id": ..., "protected_val": ..., "salt_val": ...}
+    - {"status": "OTP_REQUIRED", "session_id": ..., "session": requests.Session, "otp_tokens": {...}}
+    - {"status": "INVALID_CREDENTIALS", "error": "..."}
+    - {"status": "ERROR", "error": "..."}
+    """
+    session = requests.Session()
+    headers_get = {
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    }
+
+    try:
+        login_url = f"{YU_PORTAL_URL}/ords/r/sis/sis/login"
+        r = session.get(login_url, headers=headers_get, timeout=REQUEST_TIMEOUT)
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        p_instance = soup.find("input", {"id": "pInstance"})
+        p_sub_id = soup.find("input", {"id": "pPageSubmissionId"})
+        p_salt = soup.find("input", {"id": "pSalt"})
+        p_prot = soup.find("input", {"id": "pPageItemsProtected"})
+
+        inst_val = p_instance["value"] if p_instance else ""
+        sub_val = p_sub_id["value"] if p_sub_id else ""
+        salt_val = p_salt["value"] if p_salt else ""
+        prot_val = p_prot["value"] if p_prot else ""
+
+        login_payload = {
+            "p_flow_id": "1010",
+            "p_flow_step_id": "9999",
+            "p_instance": inst_val,
+            "p_page_submission_id": sub_val,
+            "p_request": "LOGIN",
+            "p_reload_on_submit": "S",
+            "p_json": json.dumps({
+                "pageItems": {
+                    "itemsToSubmit": [
+                        {"n": "P9999_USERNAME", "v": student_id.strip()},
+                        {"n": "P9999_PASSWORD", "v": student_password.strip()},
+                        {"n": "P9999_REMEMBER", "v": ["Y"]}
+                    ],
+                    "protected": prot_val,
+                    "rowVersion": "",
+                    "formRegionChecksums": []
+                },
+                "salt": salt_val
+            })
+        }
+
+        post_url = f"{YU_PORTAL_URL}/ords/wwv_flow.accept?p_context=sis/login/{inst_val}"
+        headers_post = {
+            "User-Agent": USER_AGENT,
+            "Referer": r.url,
+            "Origin": YU_PORTAL_URL,
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
+        }
+        resp_login = session.post(post_url, data=login_payload, headers=headers_post, timeout=REQUEST_TIMEOUT, allow_redirects=True)
+
+        if "اسم المستخدم أو كلمة المرور غير صحيحة" in resp_login.text or "invalid login" in resp_login.text.lower() or "P9999_PASSWORD" in resp_login.text and "login" in resp_login.url:
+            return {"status": "INVALID_CREDENTIALS", "error": "الرقم الجامعي أو كلمة المرور غير صحيحة."}
+
+        m_new = re.search(r"session=(\d+)", resp_login.text) or re.search(r"session=(\d+)", resp_login.url)
+        session_id = m_new.group(1) if m_new else inst_val
+
+        # فحص ما إذا كانت الصفحة تطلب تفعيل رمز التحقق (OTP)
+        r_verify_check = session.get(
+            f"{YU_PORTAL_URL}/ords/r/sis/sis/home?session={session_id}",
+            headers=headers_get,
+            timeout=REQUEST_TIMEOUT
+        )
+
+        is_otp_page = (
+            "تفعيل رمز التحقق" in r_verify_check.text or
+            "P9990_OTP_CODE" in r_verify_check.text or
+            "page-9990" in r_verify_check.text
+        )
+
+        if is_otp_page:
+            soup_otp = BeautifulSoup(r_verify_check.text, "html.parser")
+            p_sub_otp = soup_otp.find("input", {"id": "pPageSubmissionId"})
+            p_salt_otp = soup_otp.find("input", {"id": "pSalt"})
+            p_prot_otp = soup_otp.find("input", {"id": "pPageItemsProtected"})
+
+            otp_tokens = {
+                "sub_val": p_sub_otp["value"] if p_sub_otp else sub_val,
+                "salt_val": p_salt_otp["value"] if p_salt_otp else salt_val,
+                "prot_val": p_prot_otp["value"] if p_prot_otp else prot_val
+            }
+            return {
+                "status": "OTP_REQUIRED",
+                "session_id": session_id,
+                "session": session,
+                "otp_tokens": otp_tokens
+            }
+
+        # في حال تم تسجيل الدخول مباشرة بدون طلب OTP
+        tokens = _extract_classrooms_tokens(session, session_id)
+        if tokens:
+            return {
+                "status": "SUCCESS",
+                "session_id": session_id,
+                "cookies": session.cookies.get_dict(),
+                "report_req_id": tokens["report_req_id"],
+                "protected_val": tokens["protected_val"],
+                "salt_val": tokens["salt_val"]
+            }
+        else:
+            return {"status": "ERROR", "error": "تعذر تهيئة جدول الشعب والتقارير للجلسة."}
+
+    except Exception as e:
+        logger.error(f"خطأ أثناء login_student_step1: {e}")
+        return {"status": "ERROR", "error": str(e)}
+
+
+def login_student_step2_otp(session: requests.Session, session_id: str, otp_tokens: Dict[str, str], otp_code: str) -> Dict[str, Any]:
+    """
+    الخطوة 2: إرسال رمز التحقق OTP الذي أرسله الطالب وتأكيد تفعيل الجلسة
+    """
+    headers_post = {
+        "User-Agent": USER_AGENT,
+        "Referer": f"{YU_PORTAL_URL}/ords/r/sis/sis/home?session={session_id}",
+        "Origin": YU_PORTAL_URL,
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
+    }
+
+    try:
+        otp_clean = re.sub(r"\D", "", otp_code).strip()
+        otp_payload = {
+            "p_flow_id": "1010",
+            "p_flow_step_id": "9990",
+            "p_instance": session_id,
+            "p_page_submission_id": otp_tokens.get("sub_val", ""),
+            "p_request": "CONFIRM_OTP_BTN",
+            "p_reload_on_submit": "S",
+            "p_json": json.dumps({
+                "pageItems": {
+                    "itemsToSubmit": [
+                        {"n": "P9990_OTP_CODE", "v": otp_clean},
+                        {"n": "P9990_STEP", "v": "2"},
+                        {"n": "P9990_ACTION", "v": ""},
+                        {"n": "P9990_OTP_METHOD", "v": "EMAIL"}
+                    ],
+                    "protected": otp_tokens.get("prot_val", ""),
+                    "rowVersion": "",
+                    "formRegionChecksums": []
+                },
+                "salt": otp_tokens.get("salt_val", "")
+            })
+        }
+
+        post_otp_url = f"{YU_PORTAL_URL}/ords/wwv_flow.accept?p_context=sis/%D8%AA%D9%81%D8%B9%D9%8A%D9%84-%D8%B1%D9%85%D8%B2-%D8%A7%D9%84%D8%AA%D8%AD%D9%82%D9%82/{session_id}"
+        resp_confirm = session.post(
+            post_otp_url,
+            data=otp_payload,
+            headers=headers_post,
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=True
+        )
+
+        if "رمز التحقق غير صحيح" in resp_confirm.text or "invalid otp" in resp_confirm.text.lower() or "P9990_OTP_CODE" in resp_confirm.text:
+            return {"status": "INVALID_OTP", "error": "رمز التحقق غير صحيح أو انتهت صلاحيته. يرجى التأكد من كتابته بدقة."}
+
+        # استخراج توكنز جدول الشعب
+        tokens = _extract_classrooms_tokens(session, session_id)
+        if tokens:
+            return {
+                "status": "SUCCESS",
+                "session_id": session_id,
+                "cookies": session.cookies.get_dict(),
+                "report_req_id": tokens["report_req_id"],
+                "protected_val": tokens["protected_val"],
+                "salt_val": tokens["salt_val"]
+            }
+        else:
+            return {"status": "ERROR", "error": "نجح التحقق ولكن تعذر استخراج تقرير الشعب."}
+
+    except Exception as e:
+        logger.error(f"خطأ أثناء login_student_step2_otp: {e}")
+        return {"status": "ERROR", "error": str(e)}
+
+
+def _extract_classrooms_tokens(session: requests.Session, session_id: str) -> Optional[Dict[str, str]]:
+    """استخراج معرف التقرير والتوكنز لصفحة معلومات القاعات والشعب"""
+    try:
+        headers_get = {
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        }
+        class_url = f"{YU_PORTAL_URL}/ords/r/sis/sis/class-rooms-information?session={session_id}"
+        r_class = session.get(class_url, headers=headers_get, timeout=REQUEST_TIMEOUT)
+        soup_class = BeautifulSoup(r_class.text, "html.parser")
+
+        p_prot_c = soup_class.find("input", {"id": "pPageItemsProtected"})
+        p_salt_c = soup_class.find("input", {"id": "pSalt"})
+        prot_val = p_prot_c["value"] if p_prot_c else ""
+        salt_val = p_salt_c["value"] if p_salt_c else ""
+
+        m_rep = re.search(r'apex\.widget\.report\.init\(["\']faceted_search["\'],\s*["\']([^"\']+)["\']', r_class.text)
+        if not m_rep:
+            m_rep = re.search(r'["\']ajaxIdentifier["\']:\s*["\'](UkVHSU9OIFRZUEV-fjI1NDE4MDkwMTU3MjA5NTE1MA[A-Za-z0-9\-\\_]+)["\']', r_class.text)
+
+        if m_rep:
+            rep_id_raw = m_rep.group(1)
+            rep_id = rep_id_raw.encode().decode('unicode-escape')
+            report_req_id = f"PLUGIN={rep_id}" if not rep_id.startswith("PLUGIN=") else rep_id
+            return {
+                "report_req_id": report_req_id,
+                "protected_val": prot_val,
+                "salt_val": salt_val
+            }
+        return None
+    except Exception as e:
+        logger.error(f"خطأ أثناء _extract_classrooms_tokens: {e}")
+        return None

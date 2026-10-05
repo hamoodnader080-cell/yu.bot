@@ -239,6 +239,22 @@ def init_db() -> None:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_sis_accounts (
+                    user_id BIGINT PRIMARY KEY,
+                    student_id TEXT NOT NULL,
+                    student_password TEXT,
+                    session_id TEXT,
+                    cookies_json TEXT,
+                    report_req_id TEXT,
+                    protected_val TEXT,
+                    salt_val TEXT,
+                    is_active INTEGER DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
             _sync_seed_data(cursor, is_pg=True)
             logger.info("✅ PostgreSQL Database Initialized and Synced Successfully!")
         else:
@@ -310,8 +326,105 @@ def init_db() -> None:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_sis_accounts (
+                    user_id INTEGER PRIMARY KEY,
+                    student_id TEXT NOT NULL,
+                    student_password TEXT,
+                    session_id TEXT,
+                    cookies_json TEXT,
+                    report_req_id TEXT,
+                    protected_val TEXT,
+                    salt_val TEXT,
+                    is_active INTEGER DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
             logger.info("✅ SQLite Database Initialized Successfully!")
 
+
+# ==========================================
+# إدارة جلسات وحسابات الطلاب للـ SIS
+# ==========================================
+
+def save_user_sis_session(
+    user_id: int,
+    student_id: str,
+    student_password: str = "",
+    session_id: str = "",
+    cookies_dict: Optional[Dict[str, str]] = None,
+    report_req_id: str = "",
+    protected_val: str = "",
+    salt_val: str = ""
+) -> bool:
+    """حفظ أو تحديث جلسة الطالب في نظام SIS"""
+    cookies_str = json.dumps(cookies_dict or {})
+    with get_db_cursor() as (cursor, is_pg):
+        if is_pg:
+            sql = """
+                INSERT INTO user_sis_accounts (
+                    user_id, student_id, student_password, session_id,
+                    cookies_json, report_req_id, protected_val, salt_val, is_active, updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    student_id = EXCLUDED.student_id,
+                    student_password = CASE WHEN EXCLUDED.student_password != '' THEN EXCLUDED.student_password ELSE user_sis_accounts.student_password END,
+                    session_id = EXCLUDED.session_id,
+                    cookies_json = EXCLUDED.cookies_json,
+                    report_req_id = EXCLUDED.report_req_id,
+                    protected_val = EXCLUDED.protected_val,
+                    salt_val = EXCLUDED.salt_val,
+                    is_active = 1,
+                    updated_at = CURRENT_TIMESTAMP;
+            """
+            cursor.execute(sql, (user_id, student_id, student_password, session_id, cookies_str, report_req_id, protected_val, salt_val))
+        else:
+            sql = """
+                INSERT INTO user_sis_accounts (
+                    user_id, student_id, student_password, session_id,
+                    cookies_json, report_req_id, protected_val, salt_val, is_active, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    student_id = excluded.student_id,
+                    student_password = CASE WHEN excluded.student_password != '' THEN excluded.student_password ELSE user_sis_accounts.student_password END,
+                    session_id = excluded.session_id,
+                    cookies_json = excluded.cookies_json,
+                    report_req_id = excluded.report_req_id,
+                    protected_val = excluded.protected_val,
+                    salt_val = excluded.salt_val,
+                    is_active = 1,
+                    updated_at = CURRENT_TIMESTAMP;
+            """
+            cursor.execute(sql, (user_id, student_id, student_password, session_id, cookies_str, report_req_id, protected_val, salt_val))
+        return True
+
+
+def get_user_sis_session(user_id: int) -> Optional[Dict[str, Any]]:
+    """استرجاع جلسة الطالب الخاصة بـ SIS إن وجدت وكانت نشطة"""
+    with get_db_cursor() as (cursor, is_pg):
+        sql = _format_sql("SELECT * FROM user_sis_accounts WHERE user_id = ? AND is_active = 1 LIMIT 1;", is_pg)
+        cursor.execute(sql, (user_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        res = dict(row)
+        try:
+            res["cookies"] = json.loads(res.get("cookies_json") or "{}")
+        except Exception:
+            res["cookies"] = {}
+        return res
+
+
+def delete_user_sis_session(user_id: int) -> bool:
+    """إلغاء ربط أو حذف جلسة الطالب"""
+    with get_db_cursor() as (cursor, is_pg):
+        sql = _format_sql("DELETE FROM user_sis_accounts WHERE user_id = ?;", is_pg)
+        cursor.execute(sql, (user_id,))
+        return True
 
 
 def add_tracked_course(
