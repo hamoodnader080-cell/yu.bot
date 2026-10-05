@@ -620,6 +620,7 @@ async def start_link_sis_conversation(update: Update, context: ContextTypes.DEFA
         return ConversationHandler.END
 
     context.user_data.clear()
+    context.user_data["sis_state"] = "WAITING_ID"
 
     # التحقق مما إذا كان الطالب قد ربط حسابه مسبقاً
     existing = db.get_user_sis_session(user_id)
@@ -665,6 +666,7 @@ async def receive_sis_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return STATE_SIS_ID
 
     context.user_data["sis_student_id"] = digits
+    context.user_data["sis_state"] = "WAITING_PASS"
 
     prompt_pass = (
         "🔑 <b>الخطوة 2 من 2:</b>\n"
@@ -697,6 +699,7 @@ async def receive_sis_password(update: Update, context: ContextTypes.DEFAULT_TYP
     res = await loop.run_in_executor(None, login_student_step1, student_id, password)
 
     if res.get("status") == "INVALID_CREDENTIALS":
+        context.user_data.pop("sis_state", None)
         keyboard = [
             [InlineKeyboardButton("🔄 إعادة المحاولة", callback_data="btn_link_sis")],
             [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")]
@@ -710,6 +713,7 @@ async def receive_sis_password(update: Update, context: ContextTypes.DEFAULT_TYP
 
     elif res.get("status") == "OTP_REQUIRED":
         # حفظ بيانات الجلسة المؤقتة بانتظار الكود
+        context.user_data["sis_state"] = "WAITING_OTP"
         context.user_data["sis_pending_session"] = res["session"]
         context.user_data["sis_session_id"] = res["session_id"]
         context.user_data["sis_otp_tokens"] = res["otp_tokens"]
@@ -1802,6 +1806,15 @@ async def handle_general_text_and_activation(update: Update, context: ContextTyp
         f"📝 <b>الرسالة:</b> <i>{html.escape(text)}</i>",
         user_id=user_id
     )
+
+    # 1. التحقق أولاً من حالات ربط حساب الـ SIS (رقم جامعي -> كلمة مرور -> رمز OTP)
+    sis_st = context.user_data.get("sis_state")
+    if sis_st == "WAITING_ID":
+        return await receive_sis_id(update, context)
+    elif sis_st == "WAITING_PASS":
+        return await receive_sis_password(update, context)
+    elif sis_st == "WAITING_OTP":
+        return await receive_sis_otp(update, context)
 
     # إذا كان المستخدم مفعلاً بالفعل، لا داعي لمعالجة التفعيل
     is_act, _, _ = check_user_access(user_id)
