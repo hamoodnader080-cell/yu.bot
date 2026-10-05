@@ -1664,7 +1664,6 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             InlineKeyboardButton("📋 عرض المفاتيح", callback_data="btn_admin_keys")
         ],
         [
-            InlineKeyboardButton("👥 قائمة المشتركين", callback_data="btn_admin_users"),
             InlineKeyboardButton("🛡️ المشرفين (Admins)", callback_data="btn_admin_manage_admins")
         ]
     ]
@@ -2156,6 +2155,9 @@ async def callback_query_router(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer("🗑️ تم حذف المادة من قائمة المراقبة")
         await list_courses_handler(update, context)
 
+    elif data == "btn_link_sis":
+        return await start_link_sis_conversation(update, context)
+
     elif data == "btn_sis_info":
         await sis_info_handler(update, context)
 
@@ -2439,12 +2441,7 @@ def main() -> None:
         },
         fallbacks=[
             CommandHandler("cancel", cancel_conversation),
-            CommandHandler("start", start_command),
-            CommandHandler("list", list_courses_handler),
-            CommandHandler("help", help_command),
-            CommandHandler("admin", admin_stats_command),
-            CommandHandler("status", status_command),
-            CallbackQueryHandler(callback_query_router)
+            CommandHandler("start", start_command)
         ],
         allow_reentry=True,
         per_message=False,
@@ -2456,6 +2453,7 @@ def main() -> None:
         entry_points=[
             CommandHandler("link_sis", start_link_sis_conversation),
             CommandHandler("login", start_link_sis_conversation),
+            CommandHandler("linksis", start_link_sis_conversation),
             CallbackQueryHandler(start_link_sis_conversation, pattern="^btn_link_sis$")
         ],
         states={
@@ -2471,10 +2469,7 @@ def main() -> None:
         },
         fallbacks=[
             CommandHandler("cancel", cancel_conversation),
-            CommandHandler("start", start_command),
-            CommandHandler("list", list_courses_handler),
-            CommandHandler("help", help_command),
-            CallbackQueryHandler(callback_query_router)
+            CommandHandler("start", start_command)
         ],
         allow_reentry=True,
         per_message=False,
