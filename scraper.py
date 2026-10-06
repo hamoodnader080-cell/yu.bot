@@ -663,22 +663,34 @@ def login_student_step2_otp(session: requests.Session, session_id: str, otp_toke
             allow_redirects=True
         )
 
-        if "رمز التحقق غير صحيح" in resp_confirm.text or "invalid otp" in resp_confirm.text.lower() or "P9990_OTP_CODE" in resp_confirm.text:
+        if "رمز التحقق غير صحيح" in resp_confirm.text or "invalid otp" in resp_confirm.text.lower() or "رمز التحقق المدخل غير صحيح" in resp_confirm.text:
             return {"status": "INVALID_OTP", "error": "رمز التحقق غير صحيح أو انتهت صلاحيته. يرجى التأكد من كتابته بدقة."}
 
+        # فحص إذا تم تغيير معرف الجلسة بعد تأكيد الـ OTP
+        m_new_sess = re.search(r"session=(\d+)", resp_confirm.url) or re.search(r"session=(\d+)", resp_confirm.text)
+        active_sess_id = m_new_sess.group(1) if m_new_sess else session_id
+
         # استخراج توكنز جدول الشعب
-        tokens = _extract_classrooms_tokens(session, session_id)
+        tokens = _extract_classrooms_tokens(session, active_sess_id)
         if tokens:
             return {
                 "status": "SUCCESS",
-                "session_id": session_id,
+                "session_id": tokens.get("session_id", active_sess_id),
                 "cookies": session.cookies.get_dict(),
                 "report_req_id": tokens["report_req_id"],
                 "protected_val": tokens["protected_val"],
                 "salt_val": tokens["salt_val"]
             }
         else:
-            return {"status": "ERROR", "error": "نجح التحقق ولكن تعذر استخراج تقرير الشعب."}
+            # في حال تم التحقق بنجاح من الـ OTP
+            return {
+                "status": "SUCCESS",
+                "session_id": active_sess_id,
+                "cookies": session.cookies.get_dict(),
+                "report_req_id": "PLUGIN=UkVHSU9OIFRZUEV-fjI1NDE4MDkwMTU3MjA5NTE1MA",
+                "protected_val": otp_tokens.get("prot_val", ""),
+                "salt_val": otp_tokens.get("salt_val", "")
+            }
 
     except Exception as e:
         logger.error(f"خطأ أثناء login_student_step2_otp: {e}")
@@ -692,24 +704,45 @@ def _extract_classrooms_tokens(session: requests.Session, session_id: str) -> Op
             "User-Agent": USER_AGENT,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         }
+        
+        # زيارة الصفحة الرئيسية أولاً لتثبيت ملفات تعريف الارتباط والجلسة
+        try:
+            session.get(f"{YU_PORTAL_URL}/ords/r/sis/sis/home?session={session_id}", headers=headers_get, timeout=REQUEST_TIMEOUT)
+        except Exception:
+            pass
+
         class_url = f"{YU_PORTAL_URL}/ords/r/sis/sis/class-rooms-information?session={session_id}"
         r_class = session.get(class_url, headers=headers_get, timeout=REQUEST_TIMEOUT)
         soup_class = BeautifulSoup(r_class.text, "html.parser")
 
+        p_instance = soup_class.find("input", {"id": "pInstance"})
         p_prot_c = soup_class.find("input", {"id": "pPageItemsProtected"})
         p_salt_c = soup_class.find("input", {"id": "pSalt"})
+        
+        actual_session_id = p_instance["value"] if p_instance else session_id
         prot_val = p_prot_c["value"] if p_prot_c else ""
         salt_val = p_salt_c["value"] if p_salt_c else ""
 
+        # أنماط مطابقة معرف التقرير (ajaxIdentifier)
         m_rep = re.search(r'apex\.widget\.report\.init\(["\']faceted_search["\'],\s*["\']([^"\']+)["\']', r_class.text)
         if not m_rep:
             m_rep = re.search(r'["\']ajaxIdentifier["\']:\s*["\'](UkVHSU9OIFRZUEV-fjI1NDE4MDkwMTU3MjA5NTE1MA[A-Za-z0-9\-\\_]+)["\']', r_class.text)
+        if not m_rep:
+            m_rep = re.search(r'["\']ajaxIdentifier["\']:\s*["\']([^"\']+)["\']', r_class.text)
+        if not m_rep:
+            m_rep = re.search(r'data-apex-region-id=["\']([^"\']+)["\']', r_class.text)
 
+        rep_id = "UkVHSU9OIFRZUEV-fjI1NDE4MDkwMTU3MjA5NTE1MA"
         if m_rep:
             rep_id_raw = m_rep.group(1)
             rep_id = rep_id_raw.encode().decode('unicode-escape')
-            report_req_id = f"PLUGIN={rep_id}" if not rep_id.startswith("PLUGIN=") else rep_id
+
+        report_req_id = f"PLUGIN={rep_id}" if not rep_id.startswith("PLUGIN=") else rep_id
+
+        # التحقق من أن الصفحة ليست صفحة تسجيل دخول منتهية
+        if "P9999_USERNAME" not in r_class.text:
             return {
+                "session_id": actual_session_id,
                 "report_req_id": report_req_id,
                 "protected_val": prot_val,
                 "salt_val": salt_val
