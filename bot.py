@@ -532,9 +532,22 @@ async def receive_course_no(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def receive_section_no(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """استلام رقم الشعبة وبدء الفحص والمراقبة فوراً"""
-    section_no = update.message.text.strip()
+    """استلام رقم الشعبة وبدء الفحص والمراقبة فوراً مع التحقق من حالات الـ SIS"""
+    text = update.message.text.strip()
+    digits = re.sub(r"\D", "", text)
 
+    # إذا كان المستخدم في حالة SIS OTP أو أرسل رمزاً مكوناً من 6 أرقام
+    sis_st = context.user_data.get("sis_state")
+    if sis_st == "WAITING_OTP" or (len(digits) == 6 and (context.user_data.get("sis_student_id") or context.user_data.get("sis_pending_session"))):
+        return await receive_sis_otp(update, context)
+    elif sis_st == "WAITING_PASS":
+        return await receive_sis_password(update, context)
+    elif sis_st == "WAITING_MAJOR":
+        return await receive_sis_major(update, context)
+    elif sis_st == "WAITING_ID":
+        return await receive_sis_id(update, context)
+
+    section_no = text
     if not section_no.isdigit():
         await update.message.reply_text(
             "⚠️ رقم الشعبة يجب أن يكون رقماً (مثال: <code>1</code> أو <code>2</code>):",
@@ -723,6 +736,7 @@ async def start_link_sis_conversation(update: Update, context: ContextTypes.DEFA
                 "<i>(أو اضغط أدناه لإضافة حساب آخر أو إدارة الحسابات)</i>"
             )
             keyboard = [
+                [InlineKeyboardButton("🔄 إعادة إرسال الرمز (Resend Code)", callback_data="btn_resend_sis_otp")],
                 [InlineKeyboardButton("➕ إضافة حساب تخصص جديد", callback_data="btn_link_sis_new")],
                 [InlineKeyboardButton("🎓 حساباتي في SIS", callback_data="btn_sis_info")],
                 [InlineKeyboardButton("❌ إلغاء", callback_data="btn_main_menu")]
@@ -852,7 +866,10 @@ async def receive_sis_password(update: Update, context: ContextTypes.DEFAULT_TYP
             "⏳ <i>بانتظار إدخال الرمز لتأكيد ربط كليتك...</i>\n\n"
             "<i>(يمكنك إرسال /cancel في أي وقت للإلغاء)</i>"
         )
-        keyboard = [[InlineKeyboardButton("❌ إلغاء", callback_data="btn_main_menu")]]
+        keyboard = [
+            [InlineKeyboardButton("🔄 إعادة إرسال الرمز (Resend Code)", callback_data="btn_resend_sis_otp")],
+            [InlineKeyboardButton("❌ إلغاء", callback_data="btn_main_menu")]
+        ]
         await wait_msg.edit_text(otp_prompt, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
         return STATE_SIS_OTP
 
@@ -911,10 +928,56 @@ async def receive_sis_otp(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     existing_major = context.user_data.get("sis_major_name")
     user_id = update.effective_user.id
 
+    # محاولة استعادة الجلسة تلقائياً إذا كانت معلقة
     if not session or not session_id:
-        await update.message.reply_text("⚠️ انتهت مهلة الجلسة. يرجى البدء من جديد عبر القائمة الرئيسية.", parse_mode=ParseMode.HTML)
-        context.user_data.clear()
-        return ConversationHandler.END
+        if not student_id or not password:
+            existing = db.get_user_sis_account(user_id)
+            if existing and existing.get("student_id") and existing.get("student_password"):
+                student_id = existing["student_id"]
+                password = existing["student_password"]
+                existing_major = existing.get("major_name") or existing_major
+                context.user_data["sis_student_id"] = student_id
+                context.user_data["sis_password"] = password
+
+        if student_id and password:
+            loop = asyncio.get_event_loop()
+            res_step1 = await loop.run_in_executor(None, login_student_step1, student_id, password)
+            if res_step1.get("status") == "OTP_REQUIRED":
+                session = res_step1["session"]
+                session_id = res_step1["session_id"]
+                otp_tokens = res_step1["otp_tokens"]
+                context.user_data["sis_pending_session"] = session
+                context.user_data["sis_session_id"] = session_id
+                context.user_data["sis_otp_tokens"] = otp_tokens
+            elif res_step1.get("status") == "SUCCESS":
+                db.save_user_sis_session(
+                    user_id=user_id,
+                    student_id=student_id,
+                    student_password=password,
+                    session_id=res_step1["session_id"],
+                    cookies_dict=res_step1["cookies"],
+                    report_req_id=res_step1["report_req_id"],
+                    protected_val=res_step1["protected_val"],
+                    salt_val=res_step1["salt_val"],
+                    major_name=existing_major or "تخصص عام"
+                )
+                await update.message.reply_text("🎉 <b>تم تفعيل جلستك وتأكيد حسابك بنجاح!</b>", parse_mode=ParseMode.HTML)
+                context.user_data.clear()
+                return ConversationHandler.END
+
+    if not session or not session_id:
+        keyboard = [
+            [InlineKeyboardButton("🔄 إعادة إرسال الرمز (Resend Code)", callback_data="btn_resend_sis_otp")],
+            [InlineKeyboardButton("🎓 حساباتي في SIS", callback_data="btn_sis_info")],
+            [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")]
+        ]
+        await update.message.reply_text(
+            "⚠️ <b>انتهت صلاحية جلسة التحقق مؤقتاً!</b>\n\n"
+            "اضغط على «🔄 إعادة إرسال الرمز (Resend Code)» بالأسفل لطلب رمز جديد وتأكيده مباشرة:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.HTML
+        )
+        return STATE_SIS_OTP
 
     wait_msg = await update.message.reply_text("⏳ <b>جاري التحقق من الرمز وتأكيد الدخول...</b>", parse_mode=ParseMode.HTML)
 
@@ -971,22 +1034,121 @@ async def receive_sis_otp(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return STATE_SIS_MAJOR
 
     elif res.get("status") == "INVALID_OTP":
+        keyboard = [
+            [InlineKeyboardButton("🔄 إعادة إرسال الرمز (Resend Code)", callback_data="btn_resend_sis_otp")],
+            [InlineKeyboardButton("❌ إلغاء", callback_data="btn_main_menu")]
+        ]
         await wait_msg.edit_text(
-            "❌ <b>رمز التحقق غير صحيح أو منتهي الصلاحية!</b>\n\n"
-            "⚠️ يرجى التأكد من كتابة أحدث رمز وصلك على <b>Outlook</b> أو عبر <b>SMS</b> وإرساله هنا:",
+            "❌ <b>رمز التحقق غير صحيح أو انتهت صلاحيته!</b>\n\n"
+            "⚠️ يرجى التأكد من كتابة أحدث رمز وصلك على <b>Outlook</b> أو عبر <b>SMS</b>، أو اضغط زر إعادة الإرسال أدناه:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.HTML
         )
         return STATE_SIS_OTP
 
     else:
-        keyboard = [[InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")]]
+        keyboard = [
+            [InlineKeyboardButton("🔄 إعادة إرسال الرمز (Resend Code)", callback_data="btn_resend_sis_otp")],
+            [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")]
+        ]
         await wait_msg.edit_text(
             f"⚠️ <b>تعذر إتمام الدخول:</b>\n{html.escape(res.get('error', 'خطأ غير معروف'))}",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.HTML
         )
+        return STATE_SIS_OTP
+
+
+async def resend_sis_otp_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """إعادة طلب وإرسال رمز التحقق OTP من نظام SIS فوراً وبشكل تفاعلي"""
+    query = update.callback_query
+    user_id = update.effective_user.id
+
+    student_id = context.user_data.get("sis_student_id")
+    password = context.user_data.get("sis_password")
+    major = context.user_data.get("sis_major_name") or "تخصص عام"
+
+    if not student_id or not password:
+        existing = db.get_user_sis_account(user_id)
+        if existing and existing.get("student_id") and existing.get("student_password"):
+            student_id = existing["student_id"]
+            password = existing["student_password"]
+            major = existing.get("major_name") or major
+            context.user_data["sis_student_id"] = student_id
+            context.user_data["sis_password"] = password
+            context.user_data["sis_major_name"] = major
+
+    if not student_id or not password:
+        if query:
+            await query.answer("⚠️ تعذر إعادة الإرسال لعدم وجود بيانات الحساب. يرجى البدء من جديد.", show_alert=True)
+        return await prompt_new_sis_id(update, context)
+
+    if query:
+        await query.answer("🔄 جاري طلب وإعادة إرسال كود تحقق جديد...", show_alert=False)
+
+    loop = asyncio.get_event_loop()
+    res = await loop.run_in_executor(None, login_student_step1, student_id, password)
+
+    if res.get("status") == "OTP_REQUIRED":
+        context.user_data["sis_state"] = "WAITING_OTP"
+        context.user_data["sis_pending_session"] = res["session"]
+        context.user_data["sis_session_id"] = res["session_id"]
+        context.user_data["sis_otp_tokens"] = res["otp_tokens"]
+
+        now_str = datetime.now().strftime("%I:%M:%S %p")
+        otp_prompt = (
+            f"🎓 <b>حساب SIS:</b> <b>{html.escape(major)}</b> (<code>{student_id}</code>)\n\n"
+            "📩 <b>تم إعادة إرسال رمز تحقق جديد بنجاح!</b> ⚡\n"
+            f"🕒 <i>وقت الإرسال: {now_str}</i>\n\n"
+            "🔍 <b>يرجى فحص:</b>\n"
+            "📱 <b>رسائل الـ SMS النصية</b> على هاتفك\n"
+            "📧 أو <b>بريدك الجامعي (Outlook)</b>\n\n"
+            "🔢 <b>أرسل الرمز الجديد المكون من 6 أرقام هنا لإتمام التفعيل:</b>\n\n"
+            "<i>(يمكنك إرسال /cancel في أي وقت للإلغاء)</i>"
+        )
+        keyboard = [
+            [InlineKeyboardButton("🔄 إعادة إرسال الرمز (Resend Code)", callback_data="btn_resend_sis_otp")],
+            [InlineKeyboardButton("❌ إلغاء", callback_data="btn_main_menu")]
+        ]
+        if query:
+            try:
+                await query.edit_message_text(otp_prompt, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+            except Exception:
+                pass
+        return STATE_SIS_OTP
+
+    elif res.get("status") == "SUCCESS":
+        db.save_user_sis_session(
+            user_id=user_id,
+            student_id=student_id,
+            student_password=password,
+            session_id=res["session_id"],
+            cookies_dict=res["cookies"],
+            report_req_id=res["report_req_id"],
+            protected_val=res["protected_val"],
+            salt_val=res["salt_val"],
+            major_name=major
+        )
+        if query:
+            await query.answer("🎉 تم الدخول وتفعيل الجلسة مباشرة!", show_alert=True)
+            success_text = (
+                "🎉 <b>تم تسجيل الدخول وتفعيل الجلسة بنجاح!</b>\n\n"
+                f"🎓 <b>الحساب:</b> <b>{html.escape(major)}</b> (<code>{student_id}</code>)\n"
+                "🟢 <b>الحالة:</b> محدد ونشط حالياً لمراقبة شعب كليتك."
+            )
+            keyboard = [
+                [InlineKeyboardButton("➕ إضافة مادة للمراقبة", callback_data="btn_add_course")],
+                [InlineKeyboardButton("🎓 حساباتي في SIS", callback_data="btn_sis_info")],
+                [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")]
+            ]
+            await query.edit_message_text(success_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
         context.user_data.clear()
         return ConversationHandler.END
+
+    else:
+        if query:
+            await query.answer("❌ تعذر إعادة الإرسال من النظام. يرجى المحاولة لاحقاً.", show_alert=True)
+        return STATE_SIS_OTP
 
 
 async def receive_sis_major(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1086,7 +1248,10 @@ async def start_renew_sis_for_account(update: Update, context: ContextTypes.DEFA
             "🔍 يرجى فحص <b>رسائل الـ SMS</b> على هاتفك أو <b>بريدك الجامعي (Outlook)</b>.\n\n"
             "🔢 <b>أرسل الرمز المكون من 6 أرقام هنا مباشرة</b> لتأكيد تجديد الحساب فوراً:"
         )
-        keyboard = [[InlineKeyboardButton("❌ إلغاء", callback_data="btn_sis_info")]]
+        keyboard = [
+            [InlineKeyboardButton("🔄 إعادة إرسال الرمز (Resend Code)", callback_data="btn_resend_sis_otp")],
+            [InlineKeyboardButton("❌ إلغاء", callback_data="btn_sis_info")]
+        ]
         await wait_msg.edit_text(otp_prompt, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
         return STATE_SIS_OTP
 
@@ -2536,6 +2701,9 @@ async def callback_query_router(update: Update, context: ContextTypes.DEFAULT_TY
     elif data == "btn_link_sis_new":
         return await prompt_new_sis_id(update, context)
 
+    elif data == "btn_resend_sis_otp":
+        return await resend_sis_otp_handler(update, context)
+
     elif data == "btn_sis_info":
         await sis_info_handler(update, context)
 
@@ -2802,51 +2970,15 @@ async def background_course_scanner(context: ContextTypes.DEFAULT_TYPE) -> None:
 # تشغيل وتهيئة البوت (Main Entrypoint)
 # ==========================================
 
-def main() -> None:
-    """تهيئة وتشغيل البوت"""
-    # تشغيل خادم الفحص الصحي فوراً لدعم منصات السحابة (Render / Koyeb) في ثريد منفصل
-    threading.Thread(target=start_health_server, daemon=True).start()
-
-    # تهيئة قاعدة البيانات
-    db.init_db()
-
-    if not config.BOT_TOKEN or config.BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
-        print("\n" + "=" * 60)
-        print("⚠️ تنبيه: يرجى وضع التوكن الخاص ببوت التيليجرام في ملف .env أولاً!")
-        print("=" * 60 + "\n")
-        return
-
-    # بناء تطبيق التيليجرام مع تفعيل الـ JobQueue
-    application = Application.builder().token(config.BOT_TOKEN).build()
-
-    # محادثة إضافة مادة للمراقبة (خطوتان فقط: رقم المادة -> رقم الشعبة)
-    conv_handler = ConversationHandler(
-        entry_points=[
-            CommandHandler("track", start_tracking_conversation),
-            CallbackQueryHandler(start_tracking_conversation, pattern="^btn_add_course$")
-        ],
-        states={
-            WAITING_COURSE_NO: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_course_no)
-            ],
-            WAITING_SECTION_NO: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_section_no)
-            ],
-        },
-        fallbacks=[
-            CommandHandler("cancel", cancel_conversation),
-            CommandHandler("start", start_command)
-        ],
-        allow_reentry=True,
-        per_message=False,
-        block=False
-    )
-
 async def start_renew_sis_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """معالج كولباك تجديد حساب معين من القائمة"""
     acc_id = int(update.callback_query.data.replace("renew_sis_", ""))
     return await start_renew_sis_for_account(update, context, acc_id)
 
+
+# ==========================================
+# تشغيل وتهيئة البوت (Main Entrypoint)
+# ==========================================
 
 def main() -> None:
     """تهيئة وتشغيل البوت"""
@@ -2911,6 +3043,7 @@ def main() -> None:
             ],
             STATE_SIS_OTP: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_sis_otp),
+                CallbackQueryHandler(resend_sis_otp_handler, pattern="^btn_resend_sis_otp$"),
                 CallbackQueryHandler(prompt_new_sis_id, pattern="^btn_link_sis_new$"),
                 CallbackQueryHandler(start_renew_sis_cb, pattern="^renew_sis_")
             ],
