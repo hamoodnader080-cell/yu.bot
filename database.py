@@ -242,19 +242,28 @@ def init_db() -> None:
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS user_sis_accounts (
-                    user_id BIGINT PRIMARY KEY,
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
                     student_id TEXT NOT NULL,
                     student_password TEXT,
+                    major_name TEXT DEFAULT 'تخصص عام',
                     session_id TEXT,
                     cookies_json TEXT,
                     report_req_id TEXT,
                     protected_val TEXT,
                     salt_val TEXT,
                     is_active INTEGER DEFAULT 1,
+                    is_selected INTEGER DEFAULT 1,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, student_id)
                 );
             """)
+            try:
+                cursor.execute("ALTER TABLE user_sis_accounts ADD COLUMN IF NOT EXISTS major_name TEXT DEFAULT 'تخصص عام';")
+                cursor.execute("ALTER TABLE user_sis_accounts ADD COLUMN IF NOT EXISTS is_selected INTEGER DEFAULT 1;")
+            except Exception:
+                pass
             _sync_seed_data(cursor, is_pg=True)
             logger.info("✅ PostgreSQL Database Initialized and Synced Successfully!")
         else:
@@ -327,26 +336,82 @@ def init_db() -> None:
                 );
             """)
 
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS user_sis_accounts (
-                    user_id INTEGER PRIMARY KEY,
-                    student_id TEXT NOT NULL,
-                    student_password TEXT,
-                    session_id TEXT,
-                    cookies_json TEXT,
-                    report_req_id TEXT,
-                    protected_val TEXT,
-                    salt_val TEXT,
-                    is_active INTEGER DEFAULT 1,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-            """)
+            # فحص وهيكلة جدول user_sis_accounts لدعم تعدد الحسابات
+            cursor.execute("PRAGMA table_info(user_sis_accounts);")
+            col_rows = cursor.fetchall()
+            col_names = [r[1] for r in col_rows] if col_rows else []
+
+            if not col_names:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS user_sis_accounts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL,
+                        student_id TEXT NOT NULL,
+                        student_password TEXT,
+                        major_name TEXT DEFAULT 'تخصص عام',
+                        session_id TEXT,
+                        cookies_json TEXT,
+                        report_req_id TEXT,
+                        protected_val TEXT,
+                        salt_val TEXT,
+                        is_active INTEGER DEFAULT 1,
+                        is_selected INTEGER DEFAULT 1,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(user_id, student_id)
+                    );
+                """)
+            elif "id" not in col_names:
+                # ترحيل الجدول القديم إلى الهيكل الجديد متعدد الحسابات
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS user_sis_accounts_v2 (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL,
+                        student_id TEXT NOT NULL,
+                        student_password TEXT,
+                        major_name TEXT DEFAULT 'تخصص عام',
+                        session_id TEXT,
+                        cookies_json TEXT,
+                        report_req_id TEXT,
+                        protected_val TEXT,
+                        salt_val TEXT,
+                        is_active INTEGER DEFAULT 1,
+                        is_selected INTEGER DEFAULT 1,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(user_id, student_id)
+                    );
+                """)
+                cursor.execute("""
+                    INSERT OR IGNORE INTO user_sis_accounts_v2 (
+                        user_id, student_id, student_password, major_name, session_id,
+                        cookies_json, report_req_id, protected_val, salt_val, is_active, is_selected,
+                        created_at, updated_at
+                    )
+                    SELECT user_id, student_id, student_password, 'تخصص عام', session_id,
+                           cookies_json, report_req_id, protected_val, salt_val, is_active, 1,
+                           created_at, updated_at
+                    FROM user_sis_accounts;
+                """)
+                cursor.execute("DROP TABLE user_sis_accounts;")
+                cursor.execute("ALTER TABLE user_sis_accounts_v2 RENAME TO user_sis_accounts;")
+            else:
+                if "major_name" not in col_names:
+                    try:
+                        cursor.execute("ALTER TABLE user_sis_accounts ADD COLUMN major_name TEXT DEFAULT 'تخصص عام';")
+                    except Exception:
+                        pass
+                if "is_selected" not in col_names:
+                    try:
+                        cursor.execute("ALTER TABLE user_sis_accounts ADD COLUMN is_selected INTEGER DEFAULT 1;")
+                    except Exception:
+                        pass
+
             logger.info("✅ SQLite Database Initialized Successfully!")
 
 
 # ==========================================
-# إدارة جلسات وحسابات الطلاب للـ SIS
+# إدارة جلسات وحسابات الطلاب للـ SIS (Multi-Accounts)
 # ==========================================
 
 def save_user_sis_session(
@@ -357,57 +422,139 @@ def save_user_sis_session(
     cookies_dict: Optional[Dict[str, str]] = None,
     report_req_id: str = "",
     protected_val: str = "",
-    salt_val: str = ""
+    salt_val: str = "",
+    major_name: str = ""
 ) -> bool:
-    """حفظ أو تحديث جلسة الطالب في نظام SIS"""
+    """حفظ أو تحديث جلسة الطالب في نظام SIS وجعل هذا الحساب هو الحساب النشط والمحدد تلقائياً"""
     cookies_str = json.dumps(cookies_dict or {})
+    clean_major = major_name.strip() if major_name else ""
     with get_db_cursor() as (cursor, is_pg):
+        # 1. إزالة التحديد عن باقي الحسابات التابعة لنفس المستخدم
+        sql_unselect = _format_sql("UPDATE user_sis_accounts SET is_selected = 0 WHERE user_id = ?;", is_pg)
+        cursor.execute(sql_unselect, (user_id,))
+
         if is_pg:
             sql = """
                 INSERT INTO user_sis_accounts (
-                    user_id, student_id, student_password, session_id,
-                    cookies_json, report_req_id, protected_val, salt_val, is_active, updated_at
+                    user_id, student_id, student_password, major_name, session_id,
+                    cookies_json, report_req_id, protected_val, salt_val, is_active, is_selected, updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1, CURRENT_TIMESTAMP)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    student_id = EXCLUDED.student_id,
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1, 1, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id, student_id) DO UPDATE SET
                     student_password = CASE WHEN EXCLUDED.student_password != '' THEN EXCLUDED.student_password ELSE user_sis_accounts.student_password END,
+                    major_name = CASE WHEN EXCLUDED.major_name != '' THEN EXCLUDED.major_name ELSE user_sis_accounts.major_name END,
                     session_id = EXCLUDED.session_id,
                     cookies_json = EXCLUDED.cookies_json,
                     report_req_id = EXCLUDED.report_req_id,
                     protected_val = EXCLUDED.protected_val,
                     salt_val = EXCLUDED.salt_val,
                     is_active = 1,
+                    is_selected = 1,
                     updated_at = CURRENT_TIMESTAMP;
             """
-            cursor.execute(sql, (user_id, student_id, student_password, session_id, cookies_str, report_req_id, protected_val, salt_val))
+            cursor.execute(sql, (user_id, student_id, student_password, clean_major or "تخصص عام", session_id, cookies_str, report_req_id, protected_val, salt_val))
         else:
             sql = """
                 INSERT INTO user_sis_accounts (
-                    user_id, student_id, student_password, session_id,
-                    cookies_json, report_req_id, protected_val, salt_val, is_active, updated_at
+                    user_id, student_id, student_password, major_name, session_id,
+                    cookies_json, report_req_id, protected_val, salt_val, is_active, is_selected, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    student_id = excluded.student_id,
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id, student_id) DO UPDATE SET
                     student_password = CASE WHEN excluded.student_password != '' THEN excluded.student_password ELSE user_sis_accounts.student_password END,
+                    major_name = CASE WHEN excluded.major_name != '' THEN excluded.major_name ELSE user_sis_accounts.major_name END,
                     session_id = excluded.session_id,
                     cookies_json = excluded.cookies_json,
                     report_req_id = excluded.report_req_id,
                     protected_val = excluded.protected_val,
                     salt_val = excluded.salt_val,
                     is_active = 1,
+                    is_selected = 1,
                     updated_at = CURRENT_TIMESTAMP;
             """
-            cursor.execute(sql, (user_id, student_id, student_password, session_id, cookies_str, report_req_id, protected_val, salt_val))
+            cursor.execute(sql, (user_id, student_id, student_password, clean_major or "تخصص عام", session_id, cookies_str, report_req_id, protected_val, salt_val))
         return True
 
 
+def update_sis_account_major(user_id: int, student_id: str, major_name: str) -> bool:
+    """تحديث اسم التخصص لحساب معين"""
+    clean_major = major_name.strip()
+    if not clean_major:
+        return False
+    with get_db_cursor() as (cursor, is_pg):
+        sql = _format_sql("UPDATE user_sis_accounts SET major_name = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND student_id = ?;", is_pg)
+        cursor.execute(sql, (clean_major, user_id, student_id))
+        return True
+
+
+def get_user_sis_accounts(user_id: int) -> List[Dict[str, Any]]:
+    """استرجاع كافة حسابات الـ SIS المربوطة بالمستخدم مرتبة حسب الحساب المحدد ثم الأحدث"""
+    with get_db_cursor() as (cursor, is_pg):
+        sql = _format_sql("SELECT * FROM user_sis_accounts WHERE user_id = ? ORDER BY is_selected DESC, updated_at DESC;", is_pg)
+        cursor.execute(sql, (user_id,))
+        rows = cursor.fetchall()
+        accounts = []
+        for r in rows:
+            acc = dict(r)
+            try:
+                acc["cookies"] = json.loads(acc.get("cookies_json") or "{}")
+            except Exception:
+                acc["cookies"] = {}
+            if not acc.get("major_name"):
+                acc["major_name"] = "تخصص عام"
+            accounts.append(acc)
+        return accounts
+
+
 def get_user_sis_session(user_id: int) -> Optional[Dict[str, Any]]:
-    """استرجاع جلسة الطالب الخاصة بـ SIS إن وجدت وكانت نشطة"""
+    """استرجاع جلسة الحساب النشط المحدد حالياً للـ SIS"""
     with get_db_cursor() as (cursor, is_pg):
-        sql = _format_sql("SELECT * FROM user_sis_accounts WHERE user_id = ? AND is_active = 1 LIMIT 1;", is_pg)
+        # البحث عن الحساب المحدد والنشط
+        sql = _format_sql("SELECT * FROM user_sis_accounts WHERE user_id = ? AND is_selected = 1 AND is_active = 1 LIMIT 1;", is_pg)
         cursor.execute(sql, (user_id,))
+        row = cursor.fetchone()
+        if not row:
+            # محاولة البحث عن أي حساب نشط آخر
+            sql_alt = _format_sql("SELECT * FROM user_sis_accounts WHERE user_id = ? AND is_active = 1 ORDER BY updated_at DESC LIMIT 1;", is_pg)
+            cursor.execute(sql_alt, (user_id,))
+            row = cursor.fetchone()
+        if not row:
+            return None
+        res = dict(row)
+        try:
+            res["cookies"] = json.loads(res.get("cookies_json") or "{}")
+        except Exception:
+            res["cookies"] = {}
+        return res
+
+
+def get_user_sis_account(user_id: int, student_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """استرجاع حساب الطالب المحدد حالياً أو برقم جامعي محدد"""
+    with get_db_cursor() as (cursor, is_pg):
+        if student_id:
+            sql = _format_sql("SELECT * FROM user_sis_accounts WHERE user_id = ? AND student_id = ? LIMIT 1;", is_pg)
+            cursor.execute(sql, (user_id, student_id))
+        else:
+            sql = _format_sql("SELECT * FROM user_sis_accounts WHERE user_id = ? ORDER BY is_selected DESC, updated_at DESC LIMIT 1;", is_pg)
+            cursor.execute(sql, (user_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        res = dict(row)
+        try:
+            res["cookies"] = json.loads(res.get("cookies_json") or "{}")
+        except Exception:
+            res["cookies"] = {}
+        if not res.get("major_name"):
+            res["major_name"] = "تخصص عام"
+        return res
+
+
+def get_sis_account_by_id(account_id: int, user_id: int) -> Optional[Dict[str, Any]]:
+    """استرجاع حساب SIS بواسطة المعرف ID"""
+    with get_db_cursor() as (cursor, is_pg):
+        sql = _format_sql("SELECT * FROM user_sis_accounts WHERE id = ? AND user_id = ? LIMIT 1;", is_pg)
+        cursor.execute(sql, (account_id, user_id))
         row = cursor.fetchone()
         if not row:
             return None
@@ -419,35 +566,47 @@ def get_user_sis_session(user_id: int) -> Optional[Dict[str, Any]]:
         return res
 
 
-def get_user_sis_account(user_id: int) -> Optional[Dict[str, Any]]:
-    """استرجاع حساب الطالب في SIS سواء كان نشطاً أو منتهي الصلاحية"""
+def select_user_sis_account(user_id: int, account_id: int) -> bool:
+    """تعيين حساب معين كـ الحساب النشط والمحدد حالياً"""
     with get_db_cursor() as (cursor, is_pg):
-        sql = _format_sql("SELECT * FROM user_sis_accounts WHERE user_id = ? LIMIT 1;", is_pg)
-        cursor.execute(sql, (user_id,))
-        row = cursor.fetchone()
-        if not row:
-            return None
-        res = dict(row)
-        try:
-            res["cookies"] = json.loads(res.get("cookies_json") or "{}")
-        except Exception:
-            res["cookies"] = {}
-        return res
+        sql_unselect = _format_sql("UPDATE user_sis_accounts SET is_selected = 0 WHERE user_id = ?;", is_pg)
+        cursor.execute(sql_unselect, (user_id,))
+        sql_select = _format_sql("UPDATE user_sis_accounts SET is_selected = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?;", is_pg)
+        cursor.execute(sql_select, (account_id, user_id))
+        return cursor.rowcount > 0
 
 
-def set_user_sis_session_expired(user_id: int) -> bool:
-    """تعيين جلسة الطالب كـ منتهية الصلاحية"""
+def set_user_sis_session_expired(user_id: int, student_id: Optional[str] = None) -> bool:
+    """تعيين جلسة الطالب كـ منتهية الصلاحية (فاصل)"""
     with get_db_cursor() as (cursor, is_pg):
-        sql = _format_sql("UPDATE user_sis_accounts SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?;", is_pg)
-        cursor.execute(sql, (user_id,))
+        if student_id:
+            sql = _format_sql("UPDATE user_sis_accounts SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND student_id = ?;", is_pg)
+            cursor.execute(sql, (user_id, student_id))
+        else:
+            sql = _format_sql("UPDATE user_sis_accounts SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND is_selected = 1;", is_pg)
+            cursor.execute(sql, (user_id,))
         return True
 
 
 def delete_user_sis_session(user_id: int) -> bool:
-    """إلغاء ربط أو حذف جلسة الطالب"""
+    """إلغاء ربط أو حذف جميع حسابات الطالب"""
     with get_db_cursor() as (cursor, is_pg):
         sql = _format_sql("DELETE FROM user_sis_accounts WHERE user_id = ?;", is_pg)
         cursor.execute(sql, (user_id,))
+        return True
+
+
+def delete_user_sis_account_by_id(account_id: int, user_id: int) -> bool:
+    """حذف حساب SIS معين مع إعادة تعيين التحديد على حساب آخر إن وجد"""
+    with get_db_cursor() as (cursor, is_pg):
+        sql = _format_sql("DELETE FROM user_sis_accounts WHERE id = ? AND user_id = ?;", is_pg)
+        cursor.execute(sql, (account_id, user_id))
+        # إعادة تحديد الحساب الأحدث إذا لم يعد هناك حساب محدد
+        sql_check = _format_sql("SELECT id FROM user_sis_accounts WHERE user_id = ? AND is_selected = 1 LIMIT 1;", is_pg)
+        cursor.execute(sql_check, (user_id,))
+        if not cursor.fetchone():
+            sql_fix = _format_sql("UPDATE user_sis_accounts SET is_selected = 1 WHERE id = (SELECT id FROM user_sis_accounts WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1);", is_pg)
+            cursor.execute(sql_fix, (user_id,))
         return True
 
 
