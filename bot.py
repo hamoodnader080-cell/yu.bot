@@ -493,8 +493,26 @@ async def start_tracking_conversation(update: Update, context: ContextTypes.DEFA
 
 
 async def receive_course_no(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """استلام رقم/رمز المادة"""
-    course_no = update.message.text.strip().upper()
+    """استلام رقم/رمز المادة مع التحقق من حالات ربط الـ SIS لتفادي التداخل"""
+    text = update.message.text.strip()
+    
+    # إذا كان المستخدم في منتصف خطوات تسجيل الدخول لنظام SIS
+    sis_st = context.user_data.get("sis_state")
+    if sis_st == "WAITING_PASS":
+        return await receive_sis_password(update, context)
+    elif sis_st == "WAITING_OTP":
+        return await receive_sis_otp(update, context)
+    elif sis_st == "WAITING_MAJOR":
+        return await receive_sis_major(update, context)
+    elif sis_st == "WAITING_ID":
+        return await receive_sis_id(update, context)
+
+    # إذا أرسل المستخدم رقماً جامعياً وهو في خطوة المادة
+    digits = re.sub(r"\D", "", text)
+    if 7 <= len(digits) <= 11 and digits.startswith("20") and not text.upper().startswith("YU-"):
+        return await receive_sis_id(update, context)
+
+    course_no = text.upper()
     user = update.effective_user
     if len(course_no) < 2 or len(course_no) > 15:
         await update.message.reply_text(
@@ -2936,8 +2954,8 @@ def main() -> None:
     application.add_handler(CommandHandler("setlog", admin_setlog_command, filters=filters.UpdateType.MESSAGES | filters.UpdateType.CHANNEL_POSTS))
     application.add_handler(CommandHandler("unsetlog", admin_unsetlog_command, filters=filters.UpdateType.MESSAGES | filters.UpdateType.CHANNEL_POSTS))
 
-    application.add_handler(conv_handler)
     application.add_handler(sis_conv_handler)
+    application.add_handler(conv_handler)
     application.add_handler(CallbackQueryHandler(callback_query_router))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_general_text_and_activation))
     application.add_handler(MessageHandler(filters.PHOTO | filters.VOICE | filters.AUDIO | filters.Document.ALL | filters.Sticker.ALL, handle_general_media))
