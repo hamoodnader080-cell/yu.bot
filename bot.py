@@ -617,14 +617,20 @@ async def start_sis_login_conversation(update: Update, context: ContextTypes.DEF
     context.user_data.clear()
 
     prompt_text = (
-        "🎓 <b>ربط الحساب الجامعي (SIS):</b>\n\n"
-        "📌 <b>الخطوة 1 من 2:</b>\n"
+        "🎓 <b>ربط الحساب الجامعي (SIS)</b>\n\n"
+        "💡 <i>قبل ما تربط حسابك، تواصل معي عشان أساعدك وأعلمك كيف تربطه بسهولة وبدون أي غلبة:</i>\n"
+        "👉 <b>المشرف:</b> @mhmdnader5\n\n"
+        "────────────────────\n"
+        "✏️ <b>الخطوة 1 من 2:</b>\n"
         "أرسل الآن <b>رقمك الجامعي</b>:\n"
-        "<i>مثال: <code>2024827015</code></i>\n\n"
-        "<i>(أرسل /cancel للإلغاء)</i>"
+        "<i>(مثال: <code>2024123456</code>)</i>\n\n"
+        "<i>(أرسل /cancel للإلغاء في أي وقت)</i>"
     )
 
-    keyboard = [[InlineKeyboardButton("❌ إلغاء", callback_data="btn_cancel_sis")]]
+    keyboard = [
+        [InlineKeyboardButton("💬 تواصل معي (@mhmdnader5)", url="https://t.me/mhmdnader5")],
+        [InlineKeyboardButton("❌ إلغاء", callback_data="btn_cancel_sis")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     if update.callback_query:
@@ -647,7 +653,7 @@ async def receive_sis_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if not st_id or len(st_id) < 5:
         await update.message.reply_text(
-            "⚠️ الرقم الجامعي غير صحيح. يرجى إرسال رقم جامعي صالح (مثال: <code>2024827015</code>):",
+            "⚠️ الرقم الجامعي غير صحيح. يرجى إرسال رقم جامعي صالح (مثال: <code>2024123456</code>):",
             parse_mode=ParseMode.HTML
         )
         return WAITING_SIS_ID
@@ -811,12 +817,15 @@ async def sis_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         ]
     else:
         text = (
-            "🎓 <b>ربط الحساب الجامعي (SIS):</b>\n\n"
-            "اربط حسابك الجامعي ليتمكن البوت من مراقبة مواد خطتك الدراسية وشعبك بدقة 🚀\n\n"
+            "🎓 <b>ربط الحساب الجامعي (SIS)</b>\n\n"
+            "اربط حسابك الجامعي ليتمكن البوت من مراقبة كافة مواد خطتك وتخصصك بدقة 🚀\n\n"
+            "💬 <i>قبل ما تربط حسابك، تواصل معي لأعلمك كيف تربطه بسهولة:</i>\n"
+            "👉 <b>المشرف:</b> @mhmdnader5\n\n"
             "اضغط <b>«🔐 ربط الحساب الآن»</b> للبدء بخطوتين سريعتين."
         )
         keyboard = [
             [InlineKeyboardButton("🔐 ربط الحساب الآن", callback_data="btn_sis_start_login")],
+            [InlineKeyboardButton("💬 تواصل مع المشرف (@mhmdnader5)", url="https://t.me/mhmdnader5")],
             [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")]
         ]
 
