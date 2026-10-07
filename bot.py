@@ -496,21 +496,26 @@ async def receive_course_no(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     """استلام رقم/رمز المادة مع التحقق من حالات ربط الـ SIS لتفادي التداخل"""
     text = update.message.text.strip()
     
-    # إذا كان المستخدم في منتصف خطوات تسجيل الدخول لنظام SIS
+    # إذا كان المستخدم في منتصف خطوات تسجيل الدخول لنظام SIS - إنهاء محادثة المواد فوراً
     sis_st = context.user_data.get("sis_state")
     if sis_st == "WAITING_PASS":
-        return await receive_sis_password(update, context)
+        await receive_sis_password(update, context)
+        return ConversationHandler.END
     elif sis_st == "WAITING_OTP":
-        return await receive_sis_otp(update, context)
+        await receive_sis_otp(update, context)
+        return ConversationHandler.END
     elif sis_st == "WAITING_MAJOR":
-        return await receive_sis_major(update, context)
+        await receive_sis_major(update, context)
+        return ConversationHandler.END
     elif sis_st == "WAITING_ID":
-        return await receive_sis_id(update, context)
+        await receive_sis_id(update, context)
+        return ConversationHandler.END
 
-    # إذا أرسل المستخدم رقماً جامعياً وهو في خطوة المادة
+    # إذا أرسل المستخدم رقماً جامعياً وهو في خطوة المادة - توجيهه للـ SIS فوراً وإنهاء محادثة المواد
     digits = re.sub(r"\D", "", text)
     if 7 <= len(digits) <= 11 and digits.startswith("20") and not text.upper().startswith("YU-"):
-        return await receive_sis_id(update, context)
+        await receive_sis_id(update, context)
+        return ConversationHandler.END
 
     course_no = text.upper()
     user = update.effective_user
@@ -536,16 +541,20 @@ async def receive_section_no(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = update.message.text.strip()
     digits = re.sub(r"\D", "", text)
 
-    # إذا كان المستخدم في حالة SIS OTP أو أرسل رمزاً مكوناً من 6 أرقام
+    # إذا كان المستخدم في حالة SIS OTP أو أرسل رمزاً مكوناً من 6 أرقام - إنهاء محادثة المواد فوراً
     sis_st = context.user_data.get("sis_state")
     if sis_st == "WAITING_OTP" or (len(digits) == 6 and (context.user_data.get("sis_student_id") or context.user_data.get("sis_pending_session"))):
-        return await receive_sis_otp(update, context)
+        await receive_sis_otp(update, context)
+        return ConversationHandler.END
     elif sis_st == "WAITING_PASS":
-        return await receive_sis_password(update, context)
+        await receive_sis_password(update, context)
+        return ConversationHandler.END
     elif sis_st == "WAITING_MAJOR":
-        return await receive_sis_major(update, context)
+        await receive_sis_major(update, context)
+        return ConversationHandler.END
     elif sis_st == "WAITING_ID":
-        return await receive_sis_id(update, context)
+        await receive_sis_id(update, context)
+        return ConversationHandler.END
 
     section_no = text
     if not section_no.isdigit():
