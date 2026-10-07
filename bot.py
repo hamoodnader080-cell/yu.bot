@@ -294,16 +294,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     name = html.escape(user.first_name) if user and user.first_name else "طالبنا العزيز"
     role_badge = " 👑 (المالك)" if is_owner(user_id) else (" 🛡️ (مشرف)" if is_admin(user_id) else "")
 
-    fintech_note = (
-        "💡 <b>ملاحظة التخصصات:</b>\n"
-        "• 💼 تخصص <b>Fintech</b> والمواد العامة تعمل تلقائياً بدون تسجيل.\n"
-        "• 🏛️ باقي التخصصات (هندسة، طب، أعمال، حاسوب...) يرجى ربط حساب الـ SIS لمراقبة مواد كليتك وخطة تخصصك.\n\n"
-    )
-
     welcome_text = (
         f"👋 أهلاً بك <b>{name}</b>{role_badge} في <b>بوت شواغر جامعة اليرموك</b> 🎓\n\n"
         "⚡ <b>مراقبة مستمرة للمقاعد وإشعار صوتي فوري عند توفر أي شاغر!</b>\n\n"
-        f"{fintech_note}"
         "👇 <b>اختر للبدء:</b>"
     )
 
@@ -624,12 +617,11 @@ async def start_sis_login_conversation(update: Update, context: ContextTypes.DEF
     context.user_data.clear()
 
     prompt_text = (
-        "🎓 <b>ربط حسابك في بوابة اليرموك (SIS):</b>\n\n"
-        "لتمكين البوت من مراقبة كافة مواد وتخصص كليتك (هندسة، طب، تكنولوجيا، إدارة أعمال، شريعة، لغات...) بدقة حسب خطتك الدراسية 🚀\n\n"
+        "🎓 <b>ربط الحساب الجامعي (SIS):</b>\n\n"
         "📌 <b>الخطوة 1 من 2:</b>\n"
-        "أرسل الآن <b>رقمك الجامعي</b> (أو بريدك الجامعي):\n"
+        "أرسل الآن <b>رقمك الجامعي</b>:\n"
         "<i>مثال: <code>2024827015</code></i>\n\n"
-        "<i>(أرسل /cancel للإلغاء في أي وقت)</i>"
+        "<i>(أرسل /cancel للإلغاء)</i>"
     )
 
     keyboard = [[InlineKeyboardButton("❌ إلغاء", callback_data="btn_cancel_sis")]]
@@ -807,11 +799,10 @@ async def sis_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         status_badge = "متصل ونشط ✅" if is_active else "بحاجة لتجديد ⚠️"
         
         text = (
-            "🎓 <b>لوحة حسابك الجامعي (SIS):</b>\n\n"
+            "🎓 <b>حسابك الجامعي المربوط (SIS):</b>\n\n"
             f"👤 <b>الرقم الجامعي:</b> <code>{html.escape(st_id)}</code>\n"
-            f"🟢 <b>حالة الاتصال:</b> {status_badge}\n"
-            f"🔒 <b>الأمان:</b> بياناتك محفوظة ومربوطة بأمان تام 🛡️\n\n"
-            "⚡ <i>يتم استخدام هذه الجلسة تلقائياً لفحص ومراقبة كافة مواد وتخصص كليتك بكفاءة عالية.</i>"
+            f"🟢 <b>حالة الاتصال:</b> {status_badge}\n\n"
+            "⚡ <i>يتم استخدام جلستك لمراقبة مواد خطتك وتخصصك بدقة.</i>"
         )
         keyboard = [
             [InlineKeyboardButton("🔄 تجديد الجلسة فوراً", callback_data="btn_sis_relogin_fast")],
@@ -820,9 +811,9 @@ async def sis_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         ]
     else:
         text = (
-            "🎓 <b>ربط حسابك في بوابة اليرموك (SIS):</b>\n\n"
-            "عند ربط حسابك، يتمكن البوت من مراقبة كافة مواد وتخصص كليتك (هندسة، طب، تكنولوجيا، إدارة أعمال، لغات...) بدقة متناهية وبناءً على خطتك الدراسية 🚀\n\n"
-            "اضغط على زر <b>«🔐 ربط الحساب الآن»</b> وأدخل رقمك الجامعي وكلمة المرور بخطوتين فقط وبكل سهولة."
+            "🎓 <b>ربط الحساب الجامعي (SIS):</b>\n\n"
+            "اربط حسابك الجامعي ليتمكن البوت من مراقبة مواد خطتك الدراسية وشعبك بدقة 🚀\n\n"
+            "اضغط <b>«🔐 ربط الحساب الآن»</b> للبدء بخطوتين سريعتين."
         )
         keyboard = [
             [InlineKeyboardButton("🔐 ربط الحساب الآن", callback_data="btn_sis_start_login")],
