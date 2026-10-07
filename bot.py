@@ -817,12 +817,12 @@ async def sis_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             f"👤 <b>الرقم الجامعي:</b> <code>{html.escape(st_id)}</code>\n"
             f"📌 <b>حالة الجلسة:</b> {status_badge}\n\n"
             "💬 <i>إذا واجهت أي استفسار أو احتجت مساعدة، تواصل معي:</i>\n"
-            "👉 (@mhmdnader5)\n\n"
+            "👉 \u200E(@mhmdnader5)\n\n"
             "⚡ <i>يتم استخدام جلستك لمراقبة مواد خطتك وتخصصك بدقة.</i>"
         )
         keyboard = [
             [InlineKeyboardButton("🔄 تجديد الجلسة فوراً", callback_data="btn_sis_relogin_fast")],
-            [InlineKeyboardButton("🚪 فك ربط الحساب", callback_data="btn_sis_unlink")],
+            [InlineKeyboardButton("❌ فك ربط الحساب", callback_data="btn_sis_unlink")],
             [InlineKeyboardButton("(@mhmdnader5)", url="https://t.me/mhmdnader5")],
             [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")]
         ]
