@@ -401,12 +401,33 @@ class YarmoukScraper:
                     try:
                         u_id = user_session_data.get("user_id")
                         st_id = user_session_data.get("student_id")
+                        st_pwd = user_session_data.get("student_password")
+                        if u_id and st_id and st_pwd:
+                            # محاولة تجديد جلسة الطالب تلقائياً ببياناته المحفوظة
+                            logger.info(f"🔄 محاولة تجديد جلسة الطالب {st_id} تلقائياً...")
+                            login_res = login_student_step1(st_id, st_pwd)
+                            if login_res.get("status") == "SUCCESS":
+                                import database as db
+                                db.save_user_sis_session(
+                                    user_id=u_id,
+                                    student_id=st_id,
+                                    student_password=st_pwd,
+                                    session_id=login_res["session_id"],
+                                    cookies_dict=login_res["cookies"],
+                                    report_req_id=login_res["report_req_id"],
+                                    protected_val=login_res["protected_val"],
+                                    salt_val=login_res["salt_val"]
+                                )
+                                logger.info(f"✅ تم تجديد جلسة الطالب {st_id} بنجاح وإعادة الفحص فوراً!")
+                                updated_session_data = db.get_user_sis_session(u_id)
+                                return self._sync_check_course(course_no, section_no, course_name, retry_on_fail=False, user_session_data=updated_session_data)
+
                         if u_id:
                             import database as db
                             db.set_user_sis_session_expired(u_id, st_id)
                             logger.info(f"🔴 تم تعيين جلسة الطالب {st_id} كمنتهية الصلاحية (فاصل)")
                     except Exception as ex:
-                        logger.error(f"خطأ في تعيين الجلسة منتهية: {ex}")
+                        logger.error(f"خطأ في معالجة جلسة الطالب: {ex}")
 
                     logger.warning("انتهت جلسة الطالب الخاصة، التحويل للجلسة المركزية...")
                     return self._sync_check_course(course_no, section_no, course_name, retry_on_fail=True, user_session_data=None)
@@ -572,41 +593,35 @@ def login_student_step1(student_id: str, student_password: str) -> Dict[str, Any
         m_new = re.search(r"session=(\d+)", resp_login.url) or re.search(r"session=(\d+)", resp_login.text)
         session_id = m_new.group(1) if m_new else inst_val
 
-        # زيارة صفحة تفعيل رمز التحقق لتشغيل إرسال الرمز للبريد الجامعي / SMS في APEX
-        otp_page_url = f"{YU_PORTAL_URL}/ords/r/sis/sis/%D8%AA%D9%81%D8%B9%D9%8A%D9%84-%D8%B1%D9%85%D8%B2-%D8%A7%D9%84%D8%AA%D8%AD%D9%82%D9%82?session={session_id}"
-        r_otp_page = session.get(otp_page_url, headers=headers_get, timeout=REQUEST_TIMEOUT)
+        # التحقق الأولي من خطأ بيانات الاعتماد
+        if (
+            "اسم المستخدم أو كلمة المرور غير صحيحة" in resp_login.text or 
+            "invalid login" in resp_login.text.lower()
+        ):
+            return {"status": "INVALID_CREDENTIALS", "error": "الرقم الجامعي أو كلمة المرور غير صحيحة."}
+
+        # فحص حالة الجلسة عبر زيارة الصفحة الرئيسية (لتجنب إجبار صفحة OTP إذا كان الدخول مباشراً)
+        home_url = f"{YU_PORTAL_URL}/ords/r/sis/sis/home?session={session_id}"
+        r_home = session.get(home_url, headers=headers_get, timeout=REQUEST_TIMEOUT)
+
+        # التحقق إذا أعادت الصفحة إلى تسجيل الدخول
+        if "اسم المستخدم أو كلمة المرور غير صحيحة" in r_home.text:
+            return {"status": "INVALID_CREDENTIALS", "error": "الرقم الجامعي أو كلمة المرور غير صحيحة."}
 
         is_otp_page = (
-            "تفعيل رمز التحقق" in r_otp_page.text or
-            "P9990_OTP_CODE" in r_otp_page.text or
-            "page-9990" in r_otp_page.text or
+            "تفعيل رمز التحقق" in r_home.text or
+            "P9990_OTP_CODE" in r_home.text or
+            "page-9990" in r_home.text or
             "تفعيل رمز التحقق" in resp_login.text or
             "P9990_OTP_CODE" in resp_login.text
         )
 
         if is_otp_page:
-            soup_otp = BeautifulSoup(r_otp_page.text, "html.parser")
-            p_sub_otp = soup_otp.find("input", {"id": "pPageSubmissionId"})
-            p_salt_otp = soup_otp.find("input", {"id": "pSalt"})
-            p_prot_otp = soup_otp.find("input", {"id": "pPageItemsProtected"})
-
-            if not p_sub_otp:
-                soup_resp = BeautifulSoup(resp_login.text, "html.parser")
-                p_sub_otp = soup_resp.find("input", {"id": "pPageSubmissionId"})
-                p_salt_otp = soup_resp.find("input", {"id": "pSalt"})
-                p_prot_otp = soup_resp.find("input", {"id": "pPageItemsProtected"})
-
-            otp_tokens = {
-                "sub_val": p_sub_otp["value"] if p_sub_otp else sub_val,
-                "salt_val": p_salt_otp["value"] if p_salt_otp else salt_val,
-                "prot_val": p_prot_otp["value"] if p_prot_otp else prot_val
-            }
-            logger.info(f"📩 تم استدعاء صفحة OTP بنجاح للطالب {student_id} وتفعيل إرسال الرمز.")
+            logger.info(f"📩 نظام SIS يتطلب تفعيل رمز التحقق (OTP) للطالب {student_id}")
             return {
                 "status": "OTP_REQUIRED",
                 "session_id": session_id,
-                "session": session,
-                "otp_tokens": otp_tokens
+                "error": "نظام الجامعة يطلب تأكيد جلستك لأول مرة من المتصفح."
             }
 
         # في حال تم تسجيل الدخول مباشرة بدون طلب OTP
@@ -621,16 +636,11 @@ def login_student_step1(student_id: str, student_password: str) -> Dict[str, Any
                 "salt_val": tokens["salt_val"]
             }
 
-        # التحقق من خطأ بيانات الاعتماد
-        if (
-            "اسم المستخدم أو كلمة المرور غير صحيحة" in resp_login.text or 
-            "invalid login" in resp_login.text.lower() or 
-            "P9999_USERNAME" in resp_login.text or
-            "P9999_USERNAME" in r_otp_page.text
-        ):
+        # التحقق النهائي من حالة الاعتماد
+        if "P9999_USERNAME" in resp_login.text or "P9999_USERNAME" in r_home.text:
             return {"status": "INVALID_CREDENTIALS", "error": "الرقم الجامعي أو كلمة المرور غير صحيحة."}
         
-        return {"status": "INVALID_CREDENTIALS", "error": "الرقم الجامعي أو كلمة المرور غير صحيحة."}
+        return {"status": "INVALID_CREDENTIALS", "error": "تعذر تسجيل الدخول. يرجى التأكد من الرقم الجامعي وكلمة المرور."}
 
     except Exception as e:
         logger.error(f"خطأ أثناء login_student_step1: {e}")
