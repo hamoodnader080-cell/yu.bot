@@ -716,30 +716,25 @@ async def start_link_sis_conversation(update: Update, context: ContextTypes.DEFA
 
 
 async def receive_sis_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """استلام الرقم الجامعي مع التحقق من عدم التكرار والكشف الذكي لرموز المواد"""
+    """استلام الرقم الجامعي مع التحقق من عدم التكرار وتوجيه الحالات المعلقة"""
     text = update.message.text.strip()
-    digits = re.sub(r"\D", "", text)
-    has_letters = bool(re.search(r"[A-Za-z\u0621-\u064A]", text))
     user_id = update.effective_user.id
 
-    # إذا أرسل المستخدم رمز مادة أثناء هذه الخطوة (مثل CS 111L أو CS101 أو FT200)
-    if has_letters and len(text) <= 15 and not digits.startswith("20"):
-        course_no = text.upper()
-        context.user_data.clear()
-        context.user_data["course_no"] = course_no
-        await update.message.reply_text(
-            f"💡 <b>تم التعرف على رمز المادة: {html.escape(course_no)}</b>\n\n"
-            "📝 <b>الخطوة 2 من 2: رقم الشعبة</b>\n"
-            "أرسل الآن <b>رقم الشعبة</b> التي تريد مراقبتها (مثال: <code>1</code> أو <code>2</code> أو <code>4</code>):",
-            parse_mode=ParseMode.HTML
-        )
-        return WAITING_SECTION_NO
+    # إذا كان المستخدم في حالة كلمة مرور أو OTP، توجيهه فوراً للخطوة المناسبة
+    sis_st = context.user_data.get("sis_state")
+    if sis_st == "WAITING_PASS":
+        return await receive_sis_password(update, context)
+    elif sis_st == "WAITING_OTP":
+        return await receive_sis_otp(update, context)
+    elif sis_st == "WAITING_MAJOR":
+        return await receive_sis_major(update, context)
 
+    digits = re.sub(r"\D", "", text)
     if len(digits) < 7:
         await update.message.reply_text(
             "⚠️ <b>الرقم الجامعي غير صالح!</b>\n"
             "يرجى إرسال الرقم الجامعي بشكل صحيح (مثال: <code>2025123456</code>):\n\n"
-            "<i>💡 إذا كنت تريد إضافة مادة للمراقبة، أرسل /cancel ثم اضغط على «➕ إضافة مادة».</i>",
+            "<i>(أو أرسل /cancel للإلغاء)</i>",
             parse_mode=ParseMode.HTML
         )
         return STATE_SIS_ID
@@ -2993,7 +2988,8 @@ def main() -> None:
             CommandHandler("linksis", start_link_sis_conversation),
             CallbackQueryHandler(start_link_sis_conversation, pattern="^btn_link_sis$"),
             CallbackQueryHandler(prompt_new_sis_id, pattern="^btn_link_sis_new$"),
-            CallbackQueryHandler(start_renew_sis_cb, pattern="^renew_sis_")
+            CallbackQueryHandler(start_renew_sis_cb, pattern="^renew_sis_"),
+            MessageHandler(filters.Regex(r"^20\d{6,9}$"), receive_sis_id)
         ],
         states={
             STATE_SIS_ID: [
