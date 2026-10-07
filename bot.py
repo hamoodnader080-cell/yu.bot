@@ -295,38 +295,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     name = html.escape(user.first_name) if user and user.first_name else "طالبنا العزيز"
     role_badge = " 👑 (المالك)" if is_owner(user_id) else (" 🛡️ (مشرف)" if is_admin(user_id) else "")
 
-    user_accounts = db.get_user_sis_accounts(user_id)
-    selected_acc = next((a for a in user_accounts if a.get("is_selected") == 1), None)
-    if not selected_acc and user_accounts:
-        selected_acc = user_accounts[0]
-
-    sis_status_badge = ""
-    if selected_acc:
-        s_id = selected_acc["student_id"]
-        major = selected_acc.get("major_name") or "تخصص عام"
-        is_active = selected_acc.get("is_active") == 1
-        acc_count = len(user_accounts)
-        count_tag = f" ({acc_count})" if acc_count > 1 else ""
-
-        if is_active:
-            sis_btn = InlineKeyboardButton(f"🎓 حساباتي في SIS (🟢 {major}){count_tag} ⚙️", callback_data="btn_sis_info")
-            sis_status_badge = f"\n🎓 <b>حساب SIS المحدد:</b> 🟢 <b>{html.escape(major)}</b> (<code>{s_id}</code>) ✅\n"
-        else:
-            sis_btn = InlineKeyboardButton(f"⚠️ حساباتي في SIS (🔴 الحساب فاصل){count_tag} ⚙️", callback_data="btn_sis_info")
-            sis_status_badge = f"\n⚠️ <b>تنبيه:</b> 🔴 <b>الحساب فاصل</b> (<code>{html.escape(major)} - {s_id}</code>). يرجى تجديد الدخول.\n"
-    else:
-        sis_btn = InlineKeyboardButton("🔗 ربط حساب نظام SIS (تخصصات أخرى)", callback_data="btn_link_sis")
-    fintech_note = (
-        "💡 <b>ملاحظة التخصصات:</b>\n"
-        "• 💼 تخصص <b>Fintech</b> والمواد العامة تعمل تلقائياً بدون تسجيل.\n"
-        "• 🏛️ باقي التخصصات (هندسة، طب، أعمال، حاسوب...) يرجى ربط حساب الـ SIS لمراقبة مواد كليتك الخاصة.\n"
-    )
-
     welcome_text = (
         f"👋 أهلاً بك <b>{name}</b>{role_badge} في <b>بوت شواغر جامعة اليرموك</b> 🎓\n\n"
         "⚡ <b>مراقبة مستمرة للمقاعد وإشعار صوتي فوري عند توفر أي شاغر!</b>\n\n"
-        f"{fintech_note}"
-        f"{sis_status_badge}\n"
         "👇 <b>اختر للبدء:</b>"
     )
 
@@ -334,9 +305,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         [
             InlineKeyboardButton("➕ إضافة مادة للمراقبة", callback_data="btn_add_course"),
             InlineKeyboardButton("📋 موادي المراقبة", callback_data="btn_list_courses")
-        ],
-        [
-            sis_btn
         ]
     ]
 
@@ -1480,19 +1448,10 @@ async def process_activation_key(update: Update, context: ContextTypes.DEFAULT_T
             f"📚 <b>عدد المواد المسموحة:</b> <code>{max_c_text}</code>\n\n"
             "🚀 <b>تم فتح كافة خدمات البوت لك الآن!</b> يمكنك البدء بإضافة موادك لمراقبة المقاعد الشاغرة فوراً:"
         )
-        user_sis = db.get_user_sis_session(user_id)
-        if user_sis:
-            sis_btn = InlineKeyboardButton(f"🎓 حسابي في SIS ({user_sis['student_id']} ✅)", callback_data="btn_sis_info")
-        else:
-            sis_btn = InlineKeyboardButton("🎓 ربط حسابي في SIS (لكل الكليات)", callback_data="btn_link_sis")
-
         keyboard = [
             [
                 InlineKeyboardButton("➕ إضافة مادة للمراقبة", callback_data="btn_add_course"),
                 InlineKeyboardButton("📋 موادي المراقبة", callback_data="btn_list_courses")
-            ],
-            [
-                sis_btn
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
