@@ -1603,16 +1603,17 @@ async def admin_send_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     try:
-        sent_content = (
-            "📩 <b>رسالة من إدارة بوت شواغر اليرموك:</b>\n\n"
-            f"{html.escape(msg_text)}\n\n"
-            "<i>(يمكنك الرد هنا مباشرة إذا كان لديك أي استفسار)</i>"
-        )
-        await context.bot.send_message(
-            chat_id=target_id,
-            text=sent_content,
-            parse_mode=ParseMode.HTML
-        )
+        try:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text=msg_text,
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text=msg_text
+            )
         await update.message.reply_text(
             f"✅ <b>تم إرسال الرسالة بنجاح إلى الطالب!</b>\n"
             f"🆔 <b>الآيدي:</b> <code>{target_id}</code>\n"
@@ -1668,11 +1669,17 @@ async def admin_broadcast_command(update: Update, context: ContextTypes.DEFAULT_
             if reply_msg:
                 await reply_msg.copy(chat_id=target_id)
             else:
-                await context.bot.send_message(
-                    chat_id=target_id,
-                    text=f"📢 <b>إعلان من إدارة بوت الشواغر:</b>\n\n{html.escape(bc_text)}",
-                    parse_mode=ParseMode.HTML
-                )
+                try:
+                    await context.bot.send_message(
+                        chat_id=target_id,
+                        text=bc_text,
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception:
+                    await context.bot.send_message(
+                        chat_id=target_id,
+                        text=bc_text
+                    )
             success_count += 1
         except Exception:
             fail_count += 1
