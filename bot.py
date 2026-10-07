@@ -304,9 +304,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
     sis_account = db.get_user_sis_account(user_id)
-    if sis_account and sis_account.get("student_id") and sis_account.get("is_active"):
+    if sis_account and sis_account.get("student_id"):
         st_id = sis_account.get("student_id", "")
-        sis_btn_text = f"🎓 حسابي الجامعي ({st_id}) ✅"
+        is_active = bool(sis_account.get("is_active", 0))
+        if is_active:
+            sis_btn_text = "🎓 حسابي الجامعي (🟢 متصل)"
+        else:
+            sis_btn_text = "⚠️ حسابي الجامعي (🔴 فاصل - اضغط للتجديد)"
     else:
         sis_btn_text = "🎓 ربط الحساب الجامعي (SIS)"
 
@@ -805,17 +809,20 @@ async def sis_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if acc and acc.get("student_id"):
         st_id = acc.get("student_id", "")
         is_active = bool(acc.get("is_active", 0))
-        status_badge = "متصل ونشط ✅" if is_active else "بحاجة لتجديد ⚠️"
+        status_badge = "🟢 متصل ونشط" if is_active else "🔴 فاصل (يتطلب تجديد)"
         
         text = (
-            "🎓 <b>حسابك الجامعي المربوط (SIS):</b>\n\n"
+            "🎓 <b>حسابك الجامعي (SIS):</b>\n\n"
             f"👤 <b>الرقم الجامعي:</b> <code>{html.escape(st_id)}</code>\n"
-            f"🟢 <b>حالة الاتصال:</b> {status_badge}\n\n"
+            f"📌 <b>حالة الجلسة:</b> {status_badge}\n\n"
+            "💬 <i>إذا واجهت أي استفسار أو احتجت مساعدة، تواصل معي:</i>\n"
+            "👉 (@mhmdnader5)\n\n"
             "⚡ <i>يتم استخدام جلستك لمراقبة مواد خطتك وتخصصك بدقة.</i>"
         )
         keyboard = [
             [InlineKeyboardButton("🔄 تجديد الجلسة فوراً", callback_data="btn_sis_relogin_fast")],
             [InlineKeyboardButton("🚪 فك ربط الحساب", callback_data="btn_sis_unlink")],
+            [InlineKeyboardButton("(@mhmdnader5)", url="https://t.me/mhmdnader5")],
             [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")]
         ]
     else:
@@ -1910,7 +1917,7 @@ async def callback_query_router(update: Update, context: ContextTypes.DEFAULT_TY
     if data == "btn_main_menu":
         await start_command(update, context)
 
-    elif data == "btn_sis_menu":
+    elif data == "btn_sis_menu" or data == "btn_sis_info" or data == "btn_link_sis":
         await sis_menu_handler(update, context)
 
     elif data == "btn_sis_unlink":
