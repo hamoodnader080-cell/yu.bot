@@ -493,35 +493,18 @@ async def start_tracking_conversation(update: Update, context: ContextTypes.DEFA
 
 
 async def receive_course_no(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """استلام رقم/رمز المادة مع التحقق من حالات ربط الـ SIS لتفادي التداخل"""
+    """استلام رقم/رمز المادة وبدء معالجتها"""
     text = update.message.text.strip()
     
-    # إذا كان المستخدم في منتصف خطوات تسجيل الدخول لنظام SIS - إنهاء محادثة المواد فوراً
-    sis_st = context.user_data.get("sis_state")
-    if sis_st == "WAITING_PASS":
-        await receive_sis_password(update, context)
-        return ConversationHandler.END
-    elif sis_st == "WAITING_OTP":
-        await receive_sis_otp(update, context)
-        return ConversationHandler.END
-    elif sis_st == "WAITING_MAJOR":
-        await receive_sis_major(update, context)
-        return ConversationHandler.END
-    elif sis_st == "WAITING_ID":
-        await receive_sis_id(update, context)
-        return ConversationHandler.END
-
-    # إذا أرسل المستخدم رقماً جامعياً وهو في خطوة المادة - توجيهه للـ SIS فوراً وإنهاء محادثة المواد
+    # إذا أرسل المستخدم رقماً جامعياً صريحاً (7 إلى 11 خانة يبدأ بـ 20)
     digits = re.sub(r"\D", "", text)
-    if 7 <= len(digits) <= 11 and digits.startswith("20") and not text.upper().startswith("YU-"):
-        await receive_sis_id(update, context)
-        return ConversationHandler.END
+    if 7 <= len(digits) <= 11 and digits.startswith("20") and not text.upper().startswith("YU-") and not any(c.isalpha() for c in text):
+        return await receive_sis_id(update, context)
 
     course_no = text.upper()
-    user = update.effective_user
     if len(course_no) < 2 or len(course_no) > 15:
         await update.message.reply_text(
-            "⚠️ <b>رمز المادة غير صالح!</b> أرسل رمزاً صحيحاً مثل <code>CS101</code> أو <code>FT200</code>:",
+            "⚠️ <b>رمز المادة غير صالح!</b> أرسل رمزاً صحيحاً مثل <code>CS101</code> أو <code>FT200</code> أو <code>CS 111L</code>:",
             parse_mode=ParseMode.HTML
         )
         return WAITING_COURSE_NO
@@ -537,24 +520,8 @@ async def receive_course_no(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def receive_section_no(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """استلام رقم الشعبة وبدء الفحص والمراقبة فوراً مع التحقق من حالات الـ SIS"""
+    """استلام رقم الشعبة وبدء الفحص والمراقبة فوراً"""
     text = update.message.text.strip()
-    digits = re.sub(r"\D", "", text)
-
-    # إذا كان المستخدم في حالة SIS OTP أو أرسل رمزاً مكوناً من 6 أرقام - إنهاء محادثة المواد فوراً
-    sis_st = context.user_data.get("sis_state")
-    if sis_st == "WAITING_OTP" or (len(digits) == 6 and (context.user_data.get("sis_student_id") or context.user_data.get("sis_pending_session"))):
-        await receive_sis_otp(update, context)
-        return ConversationHandler.END
-    elif sis_st == "WAITING_PASS":
-        await receive_sis_password(update, context)
-        return ConversationHandler.END
-    elif sis_st == "WAITING_MAJOR":
-        await receive_sis_major(update, context)
-        return ConversationHandler.END
-    elif sis_st == "WAITING_ID":
-        await receive_sis_id(update, context)
-        return ConversationHandler.END
 
     section_no = text
     if not section_no.isdigit():
@@ -2917,41 +2884,30 @@ def main() -> None:
     # بناء تطبيق التيليجرام مع تفعيل الـ JobQueue
     application = Application.builder().token(config.BOT_TOKEN).build()
 
-    # محادثة إضافة مادة للمراقبة (خطوتان فقط: رقم المادة -> رقم الشعبة)
-    conv_handler = ConversationHandler(
+    # محادثة موحدة لإضافة المواد وإدارة حسابات SIS بدون أي تعارض
+    main_conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("track", start_tracking_conversation),
-            CallbackQueryHandler(start_tracking_conversation, pattern="^btn_add_course$")
-        ],
-        states={
-            WAITING_COURSE_NO: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_course_no)
-            ],
-            WAITING_SECTION_NO: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_section_no)
-            ],
-        },
-        fallbacks=[
-            CommandHandler("cancel", cancel_conversation),
-            CommandHandler("start", start_command)
-        ],
-        allow_reentry=True,
-        per_message=False,
-        block=False
-    )
-
-    # محادثة ربط وإدارة حسابات الطلاب بنظام SIS
-    sis_conv_handler = ConversationHandler(
-        entry_points=[
             CommandHandler("link_sis", start_link_sis_conversation),
             CommandHandler("login", start_link_sis_conversation),
             CommandHandler("linksis", start_link_sis_conversation),
+            CallbackQueryHandler(start_tracking_conversation, pattern="^btn_add_course$"),
             CallbackQueryHandler(start_link_sis_conversation, pattern="^btn_link_sis$"),
             CallbackQueryHandler(prompt_new_sis_id, pattern="^btn_link_sis_new$"),
             CallbackQueryHandler(start_renew_sis_cb, pattern="^renew_sis_"),
             MessageHandler(filters.Regex(r"^20\d{6,9}$"), receive_sis_id)
         ],
         states={
+            WAITING_COURSE_NO: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_course_no),
+                CallbackQueryHandler(start_tracking_conversation, pattern="^btn_add_course$"),
+                CallbackQueryHandler(prompt_new_sis_id, pattern="^btn_link_sis_new$")
+            ],
+            WAITING_SECTION_NO: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_section_no),
+                CallbackQueryHandler(start_tracking_conversation, pattern="^btn_add_course$"),
+                CallbackQueryHandler(prompt_new_sis_id, pattern="^btn_link_sis_new$")
+            ],
             STATE_SIS_ID: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_sis_id),
                 CallbackQueryHandler(prompt_new_sis_id, pattern="^btn_link_sis_new$"),
@@ -2980,7 +2936,7 @@ def main() -> None:
         ],
         allow_reentry=True,
         per_message=False,
-        block=True
+        block=False
     )
 
     # تسجيل المعالجات (Handlers)
@@ -3008,8 +2964,7 @@ def main() -> None:
     application.add_handler(CommandHandler("setlog", admin_setlog_command, filters=filters.UpdateType.MESSAGES | filters.UpdateType.CHANNEL_POSTS))
     application.add_handler(CommandHandler("unsetlog", admin_unsetlog_command, filters=filters.UpdateType.MESSAGES | filters.UpdateType.CHANNEL_POSTS))
 
-    application.add_handler(sis_conv_handler)
-    application.add_handler(conv_handler)
+    application.add_handler(main_conv_handler)
     application.add_handler(CallbackQueryHandler(callback_query_router))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_general_text_and_activation))
     application.add_handler(MessageHandler(filters.PHOTO | filters.VOICE | filters.AUDIO | filters.Document.ALL | filters.Sticker.ALL, handle_general_media))
