@@ -398,7 +398,16 @@ class YarmoukScraper:
 
             if is_error_response:
                 if user_session_data:
-                    # في حال كانت جلسة خاصة بالطالب وانتهت، نجرب الفحص بالجلسة المركزية
+                    try:
+                        u_id = user_session_data.get("user_id")
+                        st_id = user_session_data.get("student_id")
+                        if u_id:
+                            import database as db
+                            db.set_user_sis_session_expired(u_id, st_id)
+                            logger.info(f"🔴 تم تعيين جلسة الطالب {st_id} كمنتهية الصلاحية (فاصل)")
+                    except Exception as ex:
+                        logger.error(f"خطأ في تعيين الجلسة منتهية: {ex}")
+
                     logger.warning("انتهت جلسة الطالب الخاصة، التحويل للجلسة المركزية...")
                     return self._sync_check_course(course_no, section_no, course_name, retry_on_fail=True, user_session_data=None)
                 elif retry_on_fail:
@@ -560,34 +569,39 @@ def login_student_step1(student_id: str, student_password: str) -> Dict[str, Any
         }
         resp_login = session.post(post_url, data=login_payload, headers=headers_post, timeout=REQUEST_TIMEOUT, allow_redirects=True)
 
-        m_new = re.search(r"session=(\d+)", resp_login.text) or re.search(r"session=(\d+)", resp_login.url)
+        m_new = re.search(r"session=(\d+)", resp_login.url) or re.search(r"session=(\d+)", resp_login.text)
         session_id = m_new.group(1) if m_new else inst_val
 
-        # فحص ما إذا كانت الصفحة تطلب تفعيل رمز التحقق (OTP) أو تم الدخول
-        r_verify_check = session.get(
-            f"{YU_PORTAL_URL}/ords/r/sis/sis/home?session={session_id}",
-            headers=headers_get,
-            timeout=REQUEST_TIMEOUT
-        )
+        # زيارة صفحة تفعيل رمز التحقق لتشغيل إرسال الرمز للبريد الجامعي / SMS في APEX
+        otp_page_url = f"{YU_PORTAL_URL}/ords/r/sis/sis/%D8%AA%D9%81%D8%B9%D9%8A%D9%84-%D8%B1%D9%85%D8%B2-%D8%A7%D9%84%D8%AA%D8%AD%D9%82%D9%82?session={session_id}"
+        r_otp_page = session.get(otp_page_url, headers=headers_get, timeout=REQUEST_TIMEOUT)
 
         is_otp_page = (
-            "تفعيل رمز التحقق" in r_verify_check.text or
-            "P9990_OTP_CODE" in r_verify_check.text or
-            "page-9990" in r_verify_check.text or
+            "تفعيل رمز التحقق" in r_otp_page.text or
+            "P9990_OTP_CODE" in r_otp_page.text or
+            "page-9990" in r_otp_page.text or
+            "تفعيل رمز التحقق" in resp_login.text or
             "P9990_OTP_CODE" in resp_login.text
         )
 
         if is_otp_page:
-            soup_otp = BeautifulSoup(r_verify_check.text, "html.parser")
+            soup_otp = BeautifulSoup(r_otp_page.text, "html.parser")
             p_sub_otp = soup_otp.find("input", {"id": "pPageSubmissionId"})
             p_salt_otp = soup_otp.find("input", {"id": "pSalt"})
             p_prot_otp = soup_otp.find("input", {"id": "pPageItemsProtected"})
+
+            if not p_sub_otp:
+                soup_resp = BeautifulSoup(resp_login.text, "html.parser")
+                p_sub_otp = soup_resp.find("input", {"id": "pPageSubmissionId"})
+                p_salt_otp = soup_resp.find("input", {"id": "pSalt"})
+                p_prot_otp = soup_resp.find("input", {"id": "pPageItemsProtected"})
 
             otp_tokens = {
                 "sub_val": p_sub_otp["value"] if p_sub_otp else sub_val,
                 "salt_val": p_salt_otp["value"] if p_salt_otp else salt_val,
                 "prot_val": p_prot_otp["value"] if p_prot_otp else prot_val
             }
+            logger.info(f"📩 تم استدعاء صفحة OTP بنجاح للطالب {student_id} وتفعيل إرسال الرمز.")
             return {
                 "status": "OTP_REQUIRED",
                 "session_id": session_id,
@@ -607,8 +621,13 @@ def login_student_step1(student_id: str, student_password: str) -> Dict[str, Any
                 "salt_val": tokens["salt_val"]
             }
 
-        # إذا لم يتم استخراج التوكنز ولم تكن صفحة OTP، نتأكد من خطأ كلمة المرور
-        if "اسم المستخدم أو كلمة المرور غير صحيحة" in resp_login.text or "invalid login" in resp_login.text.lower() or "اسم المستخدم أو كلمة المرور غير صحيحة" in r_verify_check.text or "P9999_USERNAME" in r_verify_check.text:
+        # التحقق من خطأ بيانات الاعتماد
+        if (
+            "اسم المستخدم أو كلمة المرور غير صحيحة" in resp_login.text or 
+            "invalid login" in resp_login.text.lower() or 
+            "P9999_USERNAME" in resp_login.text or
+            "P9999_USERNAME" in r_otp_page.text
+        ):
             return {"status": "INVALID_CREDENTIALS", "error": "الرقم الجامعي أو كلمة المرور غير صحيحة."}
         
         return {"status": "INVALID_CREDENTIALS", "error": "الرقم الجامعي أو كلمة المرور غير صحيحة."}
@@ -663,12 +682,51 @@ def login_student_step2_otp(session: requests.Session, session_id: str, otp_toke
             allow_redirects=True
         )
 
-        if "رمز التحقق غير صحيح" in resp_confirm.text or "invalid otp" in resp_confirm.text.lower() or "رمز التحقق المدخل غير صحيح" in resp_confirm.text:
+        # فحص صريح لجميع رسائل الخطأ المعروفة (عربي وإنجليزي)
+        resp_text = resp_confirm.text
+        resp_text_lower = resp_text.lower()
+        if ("رمز التحقق غير صحيح" in resp_text or
+            "رمز التحقق المدخل غير صحيح" in resp_text or
+            "invalid otp" in resp_text_lower or
+            "invalid verification" in resp_text_lower or
+            "expired" in resp_text_lower):
             return {"status": "INVALID_OTP", "error": "رمز التحقق غير صحيح أو انتهت صلاحيته. يرجى التأكد من كتابته بدقة."}
+
+        # فحص ما إذا كانت صفحة OTP لا تزال معروضة (= الكود لم يُقبل)
+        still_otp_page = (
+            "تفعيل رمز التحقق" in resp_text or
+            "P9990_OTP_CODE" in resp_text or
+            "page-9990" in resp_text or
+            "CONFIRM_OTP_BTN" in resp_text
+        )
+        if still_otp_page:
+            logger.warning("صفحة OTP لا تزال معروضة بعد إرسال الرمز - الرمز غير صحيح أو منتهي")
+            return {"status": "INVALID_OTP", "error": "رمز التحقق غير صحيح أو انتهت صلاحيته. يرجى المحاولة مجدداً."}
 
         # فحص إذا تم تغيير معرف الجلسة بعد تأكيد الـ OTP
         m_new_sess = re.search(r"session=(\d+)", resp_confirm.url) or re.search(r"session=(\d+)", resp_confirm.text)
         active_sess_id = m_new_sess.group(1) if m_new_sess else session_id
+
+        # التحقق من أن الجلسة فعلاً نشطة عبر زيارة الصفحة الرئيسية
+        headers_get = {
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        }
+        try:
+            home_resp = session.get(
+                f"{YU_PORTAL_URL}/ords/r/sis/sis/home?session={active_sess_id}",
+                headers=headers_get,
+                timeout=REQUEST_TIMEOUT
+            )
+            # إذا أعادتنا الصفحة لتسجيل الدخول أو OTP، فالجلسة لم تنجح
+            if "P9999_USERNAME" in home_resp.text:
+                logger.warning("بعد OTP تم إعادة التوجيه لصفحة تسجيل الدخول - الجلسة غير صالحة")
+                return {"status": "INVALID_OTP", "error": "فشل التحقق من الرمز. يرجى إعادة المحاولة."}
+            if "P9990_OTP_CODE" in home_resp.text or "تفعيل رمز التحقق" in home_resp.text:
+                logger.warning("بعد OTP لا تزال صفحة OTP تظهر - الرمز لم يُقبل")
+                return {"status": "INVALID_OTP", "error": "رمز التحقق غير صحيح. يرجى المحاولة مجدداً."}
+        except Exception as e:
+            logger.warning(f"تعذر التحقق من حالة الجلسة بعد OTP: {e}")
 
         # استخراج توكنز جدول الشعب
         tokens = _extract_classrooms_tokens(session, active_sess_id)
@@ -682,15 +740,9 @@ def login_student_step2_otp(session: requests.Session, session_id: str, otp_toke
                 "salt_val": tokens["salt_val"]
             }
         else:
-            # في حال تم التحقق بنجاح من الـ OTP
-            return {
-                "status": "SUCCESS",
-                "session_id": active_sess_id,
-                "cookies": session.cookies.get_dict(),
-                "report_req_id": "PLUGIN=UkVHSU9OIFRZUEV-fjI1NDE4MDkwMTU3MjA5NTE1MA",
-                "protected_val": otp_tokens.get("prot_val", ""),
-                "salt_val": otp_tokens.get("salt_val", "")
-            }
+            # فشل في استخراج التوكنز - الجلسة قد لا تكون صالحة
+            logger.warning("تعذر استخراج توكنز الشعب بعد OTP - قد يكون الرمز غير صحيح")
+            return {"status": "INVALID_OTP", "error": "تعذر تأكيد الدخول. يرجى إعادة إرسال الرمز والمحاولة مجدداً."}
 
     except Exception as e:
         logger.error(f"خطأ أثناء login_student_step2_otp: {e}")
@@ -705,16 +757,21 @@ def _extract_classrooms_tokens(session: requests.Session, session_id: str) -> Op
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         }
         
-        # زيارة الصفحة الرئيسية أولاً لتثبيت ملفات تعريف الارتباط والجلسة
-        try:
-            session.get(f"{YU_PORTAL_URL}/ords/r/sis/sis/home?session={session_id}", headers=headers_get, timeout=REQUEST_TIMEOUT)
-        except Exception:
-            pass
-
         class_url = f"{YU_PORTAL_URL}/ords/r/sis/sis/class-rooms-information?session={session_id}"
         r_class = session.get(class_url, headers=headers_get, timeout=REQUEST_TIMEOUT)
-        soup_class = BeautifulSoup(r_class.text, "html.parser")
+        
+        # إذا كانت الصفحة غير مصرحة أو أعادتنا لتسجيل الدخول أو OTP
+        if (
+            "P9999_USERNAME" in r_class.text or 
+            "P9990_OTP_CODE" in r_class.text or 
+            "تفعيل رمز التحقق" in r_class.text or
+            "تسجيل الدخول" in r_class.text or
+            r_class.status_code != 200
+        ):
+            logger.warning("صفحة الشعب غير متاحة - الجلسة غير مصرحة أو منتهية")
+            return None
 
+        soup_class = BeautifulSoup(r_class.text, "html.parser")
         p_instance = soup_class.find("input", {"id": "pInstance"})
         p_prot_c = soup_class.find("input", {"id": "pPageItemsProtected"})
         p_salt_c = soup_class.find("input", {"id": "pSalt"})
@@ -722,6 +779,11 @@ def _extract_classrooms_tokens(session: requests.Session, session_id: str) -> Op
         actual_session_id = p_instance["value"] if p_instance else session_id
         prot_val = p_prot_c["value"] if p_prot_c else ""
         salt_val = p_salt_c["value"] if p_salt_c else ""
+
+        # يجب توفر التوكنز المحمية
+        if not prot_val or not salt_val:
+            logger.warning("لم يتم العثور على التوكنز المحمية (pPageItemsProtected / pSalt) في صفحة الشعب")
+            return None
 
         # أنماط مطابقة معرف التقرير (ajaxIdentifier)
         m_rep = re.search(r'apex\.widget\.report\.init\(["\']faceted_search["\'],\s*["\']([^"\']+)["\']', r_class.text)
@@ -732,22 +794,20 @@ def _extract_classrooms_tokens(session: requests.Session, session_id: str) -> Op
         if not m_rep:
             m_rep = re.search(r'data-apex-region-id=["\']([^"\']+)["\']', r_class.text)
 
-        rep_id = "UkVHSU9OIFRZUEV-fjI1NDE4MDkwMTU3MjA5NTE1MA"
-        if m_rep:
-            rep_id_raw = m_rep.group(1)
-            rep_id = rep_id_raw.encode().decode('unicode-escape')
+        if not m_rep:
+            logger.warning("لم يتم العثور على معرف التقرير ajaxIdentifier في صفحة الشعب")
+            return None
 
+        rep_id_raw = m_rep.group(1)
+        rep_id = rep_id_raw.encode().decode('unicode-escape')
         report_req_id = f"PLUGIN={rep_id}" if not rep_id.startswith("PLUGIN=") else rep_id
 
-        # التحقق من أن الصفحة ليست صفحة تسجيل دخول منتهية
-        if "P9999_USERNAME" not in r_class.text:
-            return {
-                "session_id": actual_session_id,
-                "report_req_id": report_req_id,
-                "protected_val": prot_val,
-                "salt_val": salt_val
-            }
-        return None
+        return {
+            "session_id": actual_session_id,
+            "report_req_id": report_req_id,
+            "protected_val": prot_val,
+            "salt_val": salt_val
+        }
     except Exception as e:
         logger.error(f"خطأ أثناء _extract_classrooms_tokens: {e}")
         return None
