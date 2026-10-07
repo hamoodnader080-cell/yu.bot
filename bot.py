@@ -622,7 +622,7 @@ async def start_sis_login_conversation(update: Update, context: ContextTypes.DEF
     prompt_text = (
         "🎓 <b>ربط الحساب الجامعي (SIS)</b>\n\n"
         "💡 <i>قبل ما تربط حسابك، تواصل معي عشان أساعدك وأعلمك كيف تربطه بسهولة وبدون أي غلبة:</i>\n"
-        "👉 <b>المشرف:</b> @mhmdnader5\n\n"
+        "👉 (@mhmdnader5)\n\n"
         "────────────────────\n"
         "✏️ <b>الخطوة 1 من 2:</b>\n"
         "أرسل الآن <b>رقمك الجامعي</b>:\n"
@@ -631,7 +631,7 @@ async def start_sis_login_conversation(update: Update, context: ContextTypes.DEF
     )
 
     keyboard = [
-        [InlineKeyboardButton("💬 تواصل معي (@mhmdnader5)", url="https://t.me/mhmdnader5")],
+        [InlineKeyboardButton("(@mhmdnader5)", url="https://t.me/mhmdnader5")],
         [InlineKeyboardButton("❌ إلغاء", callback_data="btn_cancel_sis")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -823,12 +823,12 @@ async def sis_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "🎓 <b>ربط الحساب الجامعي (SIS)</b>\n\n"
             "اربط حسابك الجامعي ليتمكن البوت من مراقبة كافة مواد خطتك وتخصصك بدقة 🚀\n\n"
             "💬 <i>قبل ما تربط حسابك، تواصل معي لأعلمك كيف تربطه بسهولة:</i>\n"
-            "👉 <b>المشرف:</b> @mhmdnader5\n\n"
+            "👉 (@mhmdnader5)\n\n"
             "اضغط <b>«🔐 ربط الحساب الآن»</b> للبدء بخطوتين سريعتين."
         )
         keyboard = [
             [InlineKeyboardButton("🔐 ربط الحساب الآن", callback_data="btn_sis_start_login")],
-            [InlineKeyboardButton("💬 تواصل مع المشرف (@mhmdnader5)", url="https://t.me/mhmdnader5")],
+            [InlineKeyboardButton("(@mhmdnader5)", url="https://t.me/mhmdnader5")],
             [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")]
         ]
 
