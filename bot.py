@@ -2222,8 +2222,17 @@ async def handle_general_text_and_activation(update: Update, context: ContextTyp
 
     # 2. التعرف الذكي التلقائي: إذا أرسل المستخدم رقماً جامعياً (7 إلى 11 خانة يبدأ بـ 20)
     digits = re.sub(r"\D", "", text)
-    if 7 <= len(digits) <= 11 and digits.startswith("20") and not text.upper().startswith("YU-"):
+    if 7 <= len(digits) <= 11 and digits.startswith("20") and not text.upper().startswith("YU-") and not any(c.isalpha() for c in text):
         return await receive_sis_id(update, context)
+
+    # 3. التعرف الذكي على رقم الشعبة إذا كان المستخدم بانتظار الشعبة
+    if context.user_data.get("course_no") and text.isdigit():
+        return await receive_section_no(update, context)
+
+    # 4. التعرف الذكي التلقائي على رمز أو رقم المادة (مثل CS 111L أو FT 200 أو CS101 أو 101330)
+    clean_text = text.strip().upper()
+    if re.match(r"^([A-Z\u0621-\u064A]{2,6}\s*\d{2,4}[A-Z\u0621-\u064A]?|\d{5,8})$", clean_text) and not clean_text.startswith("YU-"):
+        return await receive_course_no(update, context)
 
     # إذا كان المستخدم مفعلاً بالفعل، لا داعي لمعالجة التفعيل
     is_act, _, _ = check_user_access(user_id)
