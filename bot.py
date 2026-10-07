@@ -31,6 +31,8 @@ from telegram.ext import (
     ConversationHandler,
     MessageHandler,
     CallbackQueryHandler,
+    TypeHandler,
+    ApplicationHandlerStop,
     filters
 )
 
@@ -117,6 +119,23 @@ WAITING_SIS_ID, WAITING_SIS_PASS = range(10, 12)
 # كائن فاحص مواد جامعة اليرموك
 scraper = YarmoukScraper()
 
+# مراجع محادثات الإضافة والربط لمنع التداخل والتعليق بين الحالات
+global_conv_handler: Optional[ConversationHandler] = None
+global_sis_conv_handler: Optional[ConversationHandler] = None
+
+
+def reset_user_conversations(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """إلغاء وتصفير أي محادثات معلقة للمستخدم فوراً لمنع التداخل بين إضافة المواد وربط الحساب"""
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    user_id = update.effective_user.id if update.effective_user else None
+    if chat_id and user_id:
+        key = (chat_id, user_id)
+        if global_conv_handler and hasattr(global_conv_handler, "_conversations"):
+            global_conv_handler._conversations.pop(key, None)
+        if global_sis_conv_handler and hasattr(global_sis_conv_handler, "_conversations"):
+            global_sis_conv_handler._conversations.pop(key, None)
+
+
 
 # ==========================================
 # إدارة الصلاحيات ومفاتيح التفعيل (Security)
@@ -141,6 +160,40 @@ def check_user_access(user_id: int) -> Tuple[bool, str, int]:
     if not config.REQUIRE_ACTIVATION or is_admin(user_id):
         return True, "ACTIVE", config.MAX_COURSES_PER_USER
     return db.is_user_activated(user_id)
+
+
+# ==========================================
+# نظام التقييد والحد من التكرار (Rate Limiting)
+# ==========================================
+_user_last_msg_time: Dict[int, float] = {}
+RATE_LIMIT_COOLDOWN = 5.0  # ثوانٍ
+
+
+async def check_user_rate_limit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """تطبيق مهلة انتظار 5 ثوانٍ بين الرسائل والأوامر لمنع الضغط والسبام"""
+    if not update.message or not update.effective_user:
+        return
+    user_id = update.effective_user.id
+    if is_owner(user_id) or is_admin(user_id):
+        return
+
+    now = time.time()
+    last_time = _user_last_msg_time.get(user_id, 0.0)
+    elapsed = now - last_time
+
+    if elapsed < RATE_LIMIT_COOLDOWN:
+        remaining = int(RATE_LIMIT_COOLDOWN - elapsed) + 1
+        try:
+            await update.message.reply_text(
+                f"⏳ <b>مهلة انتظار:</b> يُرجى الانتظار <b>{remaining} ثوانٍ</b> قبل إرسال أمر جديد لتفادي ضغط التليجرام.",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            pass
+        raise ApplicationHandlerStop()
+
+    _user_last_msg_time[user_id] = now
+
 
 
 def format_remaining_time(expires_at_val: Any) -> str:
@@ -291,6 +344,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await send_activation_required_message(update)
         return
 
+    reset_user_conversations(update, context)
+    context.user_data.clear()
+
     name = html.escape(user.first_name) if user and user.first_name else "طالبنا العزيز"
     role_badge = " 👑 (المالك)" if is_owner(user_id) else (" 🛡️ (مشرف)" if is_admin(user_id) else "")
 
@@ -300,7 +356,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "💡 <b>ملاحظة التخصصات:</b>\n"
         "• تخصص <b>Fintech</b> والمواد العامة تعمل تلقائياً بدون تسجيل.\n"
         "• لباقي التخصصات، يرجى <b>ربط حسابك الجامعي (SIS)</b> بالزر أدناه لمراقبة مواد خطتك بدقة.\n\n"
-        "⏱️ <b>سرعة الفحص والتحديث:</b> فحص مستمر كل <b>5 ثوانٍ</b> لاقتناص أي شاغر فور توفره!\n\n"
+        "⏱️ <b>تنبيه:</b> يوجد مهلة <b>5 ثوانٍ</b> بين الأوامر والرسائل لتفادي ضغط التليجرام.\n\n"
         "👇 <b>اختر للبدء:</b>"
     )
 
@@ -447,7 +503,9 @@ async def start_tracking_conversation(update: Update, context: ContextTypes.DEFA
         await send_activation_required_message(update)
         return ConversationHandler.END
 
+    reset_user_conversations(update, context)
     context.user_data.clear()
+    context.user_data["active_flow"] = "COURSE_TRACK"
     current_count = db.get_user_course_count(user_id)
 
     if current_count >= max_allowed:
@@ -479,6 +537,12 @@ async def start_tracking_conversation(update: Update, context: ContextTypes.DEFA
 
 async def receive_course_no(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """استلام رقم/رمز المادة وبدء معالجتها"""
+    # إذا كان المستخدم في خضم تسجيل الدخول بحسابه الجامعي، تحويله لمعالج الـ SIS فوراً
+    if context.user_data.get("active_flow") == "SIS_LOGIN" or context.user_data.get("sis_student_id"):
+        if context.user_data.get("sis_student_id"):
+            return await receive_sis_password(update, context)
+        return await receive_sis_id(update, context)
+
     text = update.message.text.strip()
     course_no = text.upper()
     if len(course_no) < 2 or len(course_no) > 15:
@@ -488,6 +552,7 @@ async def receive_course_no(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return WAITING_COURSE_NO
 
+    context.user_data["active_flow"] = "COURSE_TRACK"
     context.user_data["course_no"] = course_no
 
     await update.message.reply_text(
@@ -500,10 +565,13 @@ async def receive_course_no(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def receive_section_no(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """استلام رقم الشعبة وبدء الفحص والمراقبة فوراً"""
-    text = update.message.text.strip()
+    # إذا كان المستخدم في خضم تسجيل الدخول بحسابه الجامعي، تحويله لمعالج الـ SIS فوراً
+    if context.user_data.get("active_flow") == "SIS_LOGIN" or context.user_data.get("sis_student_id"):
+        return await receive_sis_password(update, context)
 
+    text = update.message.text.strip()
     section_no = text
-    if not section_no.isdigit():
+    if not section_no.isdigit() or len(section_no) > 3:
         await update.message.reply_text(
             "⚠️ رقم الشعبة يجب أن يكون رقماً (مثال: <code>1</code> أو <code>2</code>):",
             parse_mode=ParseMode.HTML
@@ -602,11 +670,19 @@ async def receive_section_no(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """إلغاء عملية الإضافة والعودة للقائمة الرئيسية"""
+    reset_user_conversations(update, context)
     context.user_data.clear()
     cancel_text = "❌ تم إلغاء العملية والعودة للقائمة الرئيسية."
     keyboard = [[InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="btn_main_menu")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(cancel_text, reply_markup=reply_markup)
+    if update.message:
+        await update.message.reply_text(cancel_text, reply_markup=reply_markup)
+    elif update.callback_query:
+        await update.callback_query.answer()
+        try:
+            await update.callback_query.edit_message_text(cancel_text, reply_markup=reply_markup)
+        except Exception:
+            await update.callback_query.message.reply_text(cancel_text, reply_markup=reply_markup)
     return ConversationHandler.END
 
 
@@ -622,7 +698,9 @@ async def start_sis_login_conversation(update: Update, context: ContextTypes.DEF
         await send_activation_required_message(update)
         return ConversationHandler.END
 
+    reset_user_conversations(update, context)
     context.user_data.clear()
+    context.user_data["active_flow"] = "SIS_LOGIN"
 
     prompt_text = (
         "🎓 <b>ربط الحساب الجامعي (SIS)</b>\n\n"
@@ -666,7 +744,10 @@ async def receive_sis_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return WAITING_SIS_ID
 
+    context.user_data["active_flow"] = "SIS_LOGIN"
     context.user_data["sis_student_id"] = st_id
+    context.user_data.pop("course_no", None)
+    context.user_data.pop("section_no", None)
 
     prompt_text = (
         f"👤 <b>الرقم الجامعي:</b> <code>{html.escape(st_id)}</code>\n\n"
@@ -776,12 +857,14 @@ async def receive_sis_password(update: Update, context: ContextTypes.DEFAULT_TYP
         ]
         await wait_msg.edit_text(fail_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
 
+    reset_user_conversations(update, context)
     context.user_data.clear()
     return ConversationHandler.END
 
 
 async def cancel_sis_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """إلغاء محادثة ربط الحساب الجامعي"""
+    reset_user_conversations(update, context)
     context.user_data.clear()
     text = "❌ تم إلغاء عملية ربط الحساب الجامعي."
     keyboard = [[InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="btn_main_menu")]]
@@ -1851,14 +1934,22 @@ async def handle_general_text_and_activation(update: Update, context: ContextTyp
         user_id=user_id
     )
 
-    # 1. التعرف الذكي على رقم الشعبة إذا كان المستخدم بانتظار الشعبة
-    if context.user_data.get("course_no") and text.isdigit():
+    # 1. إذا كان المستخدم في مسار تسجيل الدخول للـ SIS، وجه الرسالة لمعالج الـ SIS فوراً
+    if context.user_data.get("active_flow") == "SIS_LOGIN" or context.user_data.get("sis_student_id"):
+        if context.user_data.get("sis_student_id"):
+            return await receive_sis_password(update, context)
+        return await receive_sis_id(update, context)
+
+    # 2. التعرف الذكي على رقم الشعبة فقط إذا كان المستخدم يضيف مادة حالياً والرقم مكون من 1-3 خانات
+    if context.user_data.get("active_flow") == "COURSE_TRACK" and context.user_data.get("course_no") and text.isdigit() and len(text) <= 3:
         return await receive_section_no(update, context)
 
-    # 2. التعرف الذكي التلقائي على رمز أو رقم المادة (مثل CS 111L أو FT 200 أو CS101 أو 101330)
+    # 3. التعرف الذكي التلقائي على رمز أو رقم المادة (مثل CS 111L أو FT 200 أو CS101 أو 101330)
     clean_text = text.strip().upper()
-    if re.match(r"^([A-Z\u0621-\u064A]{2,6}\s*\d{2,4}[A-Z\u0621-\u064A]?|\d{5,8})$", clean_text) and not clean_text.startswith("YU-"):
-        return await receive_course_no(update, context)
+    if context.user_data.get("active_flow") != "SIS_LOGIN" and re.match(r"^([A-Z\u0621-\u064A]{2,6}\s*\d{2,4}[A-Z\u0621-\u064A]?|\d{5,8})$", clean_text) and not clean_text.startswith("YU-"):
+        # استبعاد الأرقام الجامعية (9 خانات فأكثر) لمنع اعتبارها كمادة بالخطأ
+        if not (clean_text.isdigit() and len(clean_text) >= 9):
+            return await receive_course_no(update, context)
 
     # إذا كان المستخدم مفعلاً بالفعل، لا داعي لمعالجة التفعيل
     is_act, _, _ = check_user_access(user_id)
@@ -2516,7 +2607,7 @@ def main() -> None:
         ],
         allow_reentry=True,
         per_message=False,
-        block=False
+        block=True
     )
 
     # محادثة ربط الحساب الجامعي (SIS: خطوتان فقط: الرقم الجامعي -> كلمة المرور)
@@ -2542,8 +2633,15 @@ def main() -> None:
         ],
         allow_reentry=True,
         per_message=False,
-        block=False
+        block=True
     )
+
+    global global_conv_handler, global_sis_conv_handler
+    global_conv_handler = conv_handler
+    global_sis_conv_handler = sis_conv_handler
+
+    # نظام التقييد والحد من الضغط والسبام (مهلة 5 ثوانٍ بين الرسائل والأوامر)
+    application.add_handler(TypeHandler(Update, check_user_rate_limit), group=-1)
 
     # تسجيل المعالجات (Handlers)
     application.add_handler(CommandHandler("start", start_command))
