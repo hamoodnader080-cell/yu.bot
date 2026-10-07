@@ -241,6 +241,15 @@ def init_db() -> None:
             """)
 
             cursor.execute("""
+                CREATE TABLE IF NOT EXISTS bot_users (
+                    user_id BIGINT PRIMARY KEY,
+                    username TEXT,
+                    first_name TEXT,
+                    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS user_sis_accounts (
                     id SERIAL PRIMARY KEY,
                     user_id BIGINT NOT NULL,
@@ -333,6 +342,15 @@ def init_db() -> None:
                     setting_key TEXT PRIMARY KEY,
                     setting_val TEXT,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS bot_users (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    first_name TEXT,
+                    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
 
@@ -1237,3 +1255,82 @@ def remove_sub_admin(user_id: int) -> bool:
     uids = [str(item["user_id"]) for item in new_data]
     set_setting("sub_admins", ",".join(uids))
     return True
+
+
+def record_bot_user(user_id: int, username: Optional[str] = None, first_name: Optional[str] = None) -> None:
+    """تسجيل أو تحديث ظهور المستخدم في البوت لإرسال الإذاعات والإشعارات"""
+    try:
+        with get_db_cursor() as (cursor, is_pg):
+            now_iso = datetime.now().isoformat()
+            if is_pg:
+                cursor.execute("""
+                    INSERT INTO bot_users (user_id, username, first_name, last_seen)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        username = EXCLUDED.username,
+                        first_name = EXCLUDED.first_name,
+                        last_seen = EXCLUDED.last_seen;
+                """, (user_id, username, first_name, now_iso))
+            else:
+                cursor.execute("""
+                    INSERT INTO bot_users (user_id, username, first_name, last_seen)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        username=excluded.username,
+                        first_name=excluded.first_name,
+                        last_seen=excluded.last_seen;
+                """, (user_id, username, first_name, now_iso))
+    except Exception as e:
+        logger.error(f"Error in record_bot_user: {e}")
+
+
+def get_all_broadcast_users() -> List[int]:
+    """جلب جميع معرّفات المستخدمين (IDs) المسجلين في البوت للإذاعة الجماعية"""
+    users_set = set()
+    try:
+        with get_db_cursor() as (cursor, is_pg):
+            # 1. من جدول bot_users
+            try:
+                cursor.execute("SELECT user_id FROM bot_users;")
+                for r in cursor.fetchall():
+                    uid = _get_scalar(r)
+                    if uid:
+                        users_set.add(int(uid))
+            except Exception:
+                pass
+
+            # 2. من جدول activated_users
+            try:
+                cursor.execute("SELECT user_id FROM activated_users;")
+                for r in cursor.fetchall():
+                    uid = _get_scalar(r)
+                    if uid:
+                        users_set.add(int(uid))
+            except Exception:
+                pass
+
+            # 3. من جدول tracked_courses
+            try:
+                cursor.execute("SELECT DISTINCT user_id FROM tracked_courses;")
+                for r in cursor.fetchall():
+                    uid = _get_scalar(r)
+                    if uid:
+                        users_set.add(int(uid))
+            except Exception:
+                pass
+
+            # 4. من جدول user_sis_accounts
+            try:
+                cursor.execute("SELECT DISTINCT user_id FROM user_sis_accounts;")
+                for r in cursor.fetchall():
+                    uid = _get_scalar(r)
+                    if uid:
+                        users_set.add(int(uid))
+            except Exception:
+                pass
+
+    except Exception as e:
+        logger.error(f"Error getting broadcast users: {e}")
+
+    return list(users_set)
+

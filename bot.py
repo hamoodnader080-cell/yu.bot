@@ -193,6 +193,8 @@ async def check_user_rate_limit(update: Update, context: ContextTypes.DEFAULT_TY
         raise ApplicationHandlerStop()
 
     _user_last_msg_time[user_id] = now
+    if update.effective_user:
+        db.record_bot_user(user_id, update.effective_user.username, update.effective_user.first_name)
 
 
 
@@ -322,6 +324,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     u_user = f"@{user.username}" if user and user.username else "بدون يوزر"
     if user:
         db.sync_user_profile(user_id, user.username, user.first_name)
+        db.record_bot_user(user_id, user.username, user.first_name)
     await send_to_log_channel(
         context,
         f"🟢 <b>مستخدم فتح البوت (/start):</b>\n"
@@ -1562,6 +1565,145 @@ async def admin_delkey_command(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"⚠️ لم يتم العثور على المفتاح <code>{target_key}</code> في قاعدة البيانات.", parse_mode=ParseMode.HTML)
 
 
+async def admin_send_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """إرسال رسالة مباشرة من الإدارة إلى طالب محدد عبر الآيدي: /send <user_id> <text>"""
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ هذا الأمر مخصص لمالك ومشرفي البوت فقط!")
+        return
+
+    # فحص الرد المباشر (Reply) على رسالة في قناة السجلات أو بالمحادثة
+    target_id = None
+    msg_text = ""
+
+    if update.message.reply_to_message and update.message.reply_to_message.text:
+        match = re.search(r"\[<code>(\d+)</code>\]|user\?id=(\d+)|الآيدي:\s*<code>(\d+)</code>", update.message.reply_to_message.text)
+        if match:
+            target_id = int(match.group(1) or match.group(2) or match.group(3))
+            msg_text = " ".join(context.args) if context.args else ""
+
+    if not target_id:
+        if not context.args or len(context.args) < 2 or not context.args[0].isdigit():
+            await update.message.reply_text(
+                "ℹ️ <b>طريقة إرسال رسالة لطالب معين:</b>\n\n"
+                "اكتب:\n"
+                "<code>/send &lt;user_id&gt; نص الرسالة هنا</code>\n\n"
+                "<b>مثال:</b>\n"
+                "<code>/send 123456789 مرحباً، تم فحص حسابك وتفعيله بنجاح!</code>\n\n"
+                "💡 <i>أو قم بالرد (Reply) على رسالة الطالب في قناة السجلات واكتب:</i>\n"
+                "<code>/send نص رسالتك هنا</code>",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        target_id = int(context.args[0])
+        msg_text = " ".join(context.args[1:])
+
+    if not msg_text.strip():
+        await update.message.reply_text("⚠️ يرجى كتابة نص الرسالة التي تريد إرسالها للطالب!")
+        return
+
+    try:
+        sent_content = (
+            "📩 <b>رسالة من إدارة بوت شواغر اليرموك:</b>\n\n"
+            f"{html.escape(msg_text)}\n\n"
+            "<i>(يمكنك الرد هنا مباشرة إذا كان لديك أي استفسار)</i>"
+        )
+        await context.bot.send_message(
+            chat_id=target_id,
+            text=sent_content,
+            parse_mode=ParseMode.HTML
+        )
+        await update.message.reply_text(
+            f"✅ <b>تم إرسال الرسالة بنجاح إلى الطالب!</b>\n"
+            f"🆔 <b>الآيدي:</b> <code>{target_id}</code>\n"
+            f"📝 <b>النص:</b> <i>{html.escape(msg_text)}</i>",
+            parse_mode=ParseMode.HTML
+        )
+    except telegram.error.Forbidden:
+        await update.message.reply_text(f"❌ تعذر الإرسال: الطالب برقم <code>{target_id}</code> قام بحظر البوت أو حذفه.", parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await update.message.reply_text(f"❌ حدث خطأ أثناء إرسال الرسالة: {e}")
+
+
+async def admin_broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """إذاعة وإرسال رسالة أو وسائط لجميع الطلاب المشتركين: /bc <نص> أو بالرد على رسالة"""
+    user_id = update.effective_user.id
+    if not is_owner(user_id) and not is_admin(user_id):
+        await update.message.reply_text("⛔ هذا الأمر مخصص لمالك البوت فقط!")
+        return
+
+    reply_msg = update.message.reply_to_message
+    bc_text = " ".join(context.args) if context.args else ""
+
+    if not reply_msg and not bc_text:
+        await update.message.reply_text(
+            "📢 <b>طريقة عمل الإذاعة الجماعية لجميع الطلاب:</b>\n\n"
+            "1️⃣ <b>إذاعة نصية مباشرة:</b>\n"
+            "<code>/bc أهلاً بكم، بدأت الآن فترة السحب والإضافة!</code>\n\n"
+            "2️⃣ <b>إذاعة صورة / ملف / فويس / تصميم:</b>\n"
+            "أرسل الصورة أو الرسالة في المحادثة، ثم اعمل عليها رد (Reply) واكتب فقط: <code>/bc</code>\n\n"
+            "⚡ <i>سيقوم البوت بنسخها وإرسالها فوراً لكافة الطلاب مع تقرير فوري.</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    recipients = db.get_all_broadcast_users()
+    if not recipients:
+        await update.message.reply_text("📭 لا يوجد أي مستخدمين مسجلين في قاعدة البيانات حتى الآن لإرسال الإذاعة لهم.")
+        return
+
+    status_msg = await update.message.reply_text(
+        f"⏳ <b>جاري بدء الإذاعة...</b>\n"
+        f"👥 إجمالي الطلاب المستهدفين: <b>{len(recipients)}</b> طالب\n"
+        f"⚡ يرجى الانتظار لحين اكتمال الإرسال.",
+        parse_mode=ParseMode.HTML
+    )
+
+    success_count = 0
+    fail_count = 0
+    start_time = time.time()
+
+    for idx, target_id in enumerate(recipients, 1):
+        try:
+            if reply_msg:
+                await reply_msg.copy(chat_id=target_id)
+            else:
+                await context.bot.send_message(
+                    chat_id=target_id,
+                    text=f"📢 <b>إعلان من إدارة بوت الشواغر:</b>\n\n{html.escape(bc_text)}",
+                    parse_mode=ParseMode.HTML
+                )
+            success_count += 1
+        except Exception:
+            fail_count += 1
+
+        await asyncio.sleep(0.04)
+
+        if idx % 25 == 0:
+            try:
+                await status_msg.edit_text(
+                    f"⏳ <b>جاري إرسال الإذاعة ({idx}/{len(recipients)})...</b>\n"
+                    f"✅ ناجح: {success_count} | ❌ تعذر: {fail_count}",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception:
+                pass
+
+    elapsed = round(time.time() - start_time, 1)
+    summary_text = (
+        "📢 <b>اكتملت الإذاعة الجماعية بنجاح!</b> 🎉\n\n"
+        f"👥 <b>إجمالي المستهدفين:</b> <code>{len(recipients)}</code>\n"
+        f"✅ <b>تم الإرسال بنجاح:</b> <code>{success_count}</code> طالب\n"
+        f"❌ <b>تعذر الإرسال:</b> <code>{fail_count}</code> (حظر أو خطأ)\n"
+        f"⏱️ <b>الوقت المستغرق:</b> <code>{elapsed}</code> ثانية"
+    )
+    try:
+        await status_msg.edit_text(summary_text, parse_mode=ParseMode.HTML)
+    except Exception:
+        await update.message.reply_text(summary_text, parse_mode=ParseMode.HTML)
+
+
+
 
 async def get_user_display_info(bot, user_id: int) -> Tuple[str, str]:
     """جلب الاسم الحقيقي واليوزر للمستخدم من تيليجرام أو قاعدة البيانات"""
@@ -1792,7 +1934,9 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"🛡️ <b>عدد المشرفين (Admins):</b> <code>{sub_admins_count}</code> مشرف\n"
             f"📢 <b>قناة السجلات الخاصة:</b> <code>{log_ch}</code>\n"
         )
-    text += f"⏱️ <b>معدل الفحص الدوري:</b> كل <code>{config.CHECK_INTERVAL_SECONDS}</code> ثوانٍ\n"
+    text += f"⏱️ <b>معدل الفحص الدوري:</b> كل <code>{config.CHECK_INTERVAL_SECONDS}</code> ثوانٍ\n\n"
+    text += "📢 <b>الإذاعة الجماعية:</b> <code>/bc &lt;النص&gt;</code> (أو بالرد على أي رسالة/صورة)\n"
+    text += "✉️ <b>مراسلة طالب:</b> <code>/send &lt;id&gt; &lt;النص&gt;</code>\n"
 
     keyboard = [
         [
@@ -2667,6 +2811,10 @@ def main() -> None:
     application.add_handler(CommandHandler("deladmin", admin_deladmin_command))
     application.add_handler(CommandHandler("setlog", admin_setlog_command, filters=filters.UpdateType.MESSAGES | filters.UpdateType.CHANNEL_POSTS))
     application.add_handler(CommandHandler("unsetlog", admin_unsetlog_command, filters=filters.UpdateType.MESSAGES | filters.UpdateType.CHANNEL_POSTS))
+    application.add_handler(CommandHandler("send", admin_send_command))
+    application.add_handler(CommandHandler("reply", admin_send_command))
+    application.add_handler(CommandHandler("bc", admin_broadcast_command))
+    application.add_handler(CommandHandler("broadcast", admin_broadcast_command))
 
     application.add_handler(conv_handler)
     application.add_handler(sis_conv_handler)
