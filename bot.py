@@ -316,8 +316,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     keyboard = [
         [
-            InlineKeyboardButton("➕ إضافة مادة للمراقبة", callback_data="btn_add_course"),
-            InlineKeyboardButton("📋 موادي المراقبة", callback_data="btn_list_courses")
+            InlineKeyboardButton("➕ إضافة مادة للمراقبة", callback_data="btn_add_course")
         ],
         [
             InlineKeyboardButton(sis_btn_text, callback_data="btn_sis_menu")
